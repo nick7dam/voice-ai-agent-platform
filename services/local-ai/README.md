@@ -8,7 +8,7 @@ Use these first:
 
 ```text
 STT: Systran/faster-distil-whisper-large-v3
-Reasoning: qwen3:8b through Ollama
+Reasoning: llama3.2:3b through Ollama for low latency, or qwen3:8b for higher quality
 TTS: hexgrad/Kokoro-82M
 TTS voice: af_heart
 ```
@@ -63,13 +63,14 @@ TTS:
 ```bash
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
+LOCAL_TTS_DEVICE=auto \
 .venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
 Ollama:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull llama3.2:3b
 ollama serve
 ```
 
@@ -82,6 +83,13 @@ with:
 LOCAL_STT_DEVICE=cuda \
 LOCAL_STT_COMPUTE_TYPE=float16 \
 .venv-stt/bin/python services/local-ai/stt_server.py
+```
+
+Run local TTS on CUDA:
+
+```bash
+LOCAL_TTS_DEVICE=cuda \
+.venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
 CPU STT is usable for testing, but a GPU instance is much better for production

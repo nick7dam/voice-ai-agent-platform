@@ -67,20 +67,25 @@ LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
 LOCAL_STT_BASE_URL=http://localhost:8001
 
 REASONING_PROVIDER=ollama
-OLLAMA_MODEL=qwen3:8b
+OLLAMA_MODEL=llama3.2:3b
 OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_NUM_PREDICT=120
+OLLAMA_NUM_CTX=2048
+OLLAMA_KEEP_ALIVE=30m
+OLLAMA_THINK=false
 
 TTS_PROVIDER=local_kokoro
 TTS_ENABLED=true
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M
 LOCAL_TTS_VOICE=af_heart
 LOCAL_TTS_BASE_URL=http://localhost:8002
+LOCAL_TTS_DEVICE=auto
 ```
 
 Recommended model names:
 
 - STT: `Systran/faster-distil-whisper-large-v3`
-- Reasoning: `qwen3:8b`
+- Reasoning: `llama3.2:3b` for low latency, or `qwen3:8b` when quality matters more than speed
 - TTS: `hexgrad/Kokoro-82M`
 - TTS voice: `af_heart`
 
@@ -117,13 +122,14 @@ Run local TTS:
 ```bash
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
+LOCAL_TTS_DEVICE=auto \
 pnpm local:tts
 ```
 
 Run Ollama:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull llama3.2:3b
 ollama serve
 ```
 
@@ -134,6 +140,13 @@ with:
 LOCAL_STT_DEVICE=cuda \
 LOCAL_STT_COMPUTE_TYPE=float16 \
 pnpm local:stt
+```
+
+Run local TTS with CUDA:
+
+```bash
+LOCAL_TTS_DEVICE=cuda \
+pnpm local:tts
 ```
 
 See `services/local-ai/README.md` for more local model details.
@@ -153,6 +166,9 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 ```
 
 `OLLAMA_REQUEST_TIMEOUT_MS` controls the full `/api/chat` request timeout. Increase it for slower remote models or cold starts.
+`OLLAMA_NUM_PREDICT` caps generated tokens for voice latency. Lower it for snappier replies, for example `80`.
+`OLLAMA_KEEP_ALIVE` keeps the model loaded after a request so the next turn avoids a cold start.
+`OLLAMA_THINK=false` disables supported model thinking output/effort, which is useful for low-latency voice turns.
 `MIN_STT_AUDIO_BYTES` is a backend guard: turns smaller than this are discarded before STT.
 `TTS_ENABLED` controls optional speech playback. Text is still emitted first as `assistant.response`.
 `TTS_PLAYBACK_MODE=first_sentence` keeps voice latency low by speaking only the first sentence. Use `first_segment` for the first 200-character chunk or `full` to synthesize the full response.

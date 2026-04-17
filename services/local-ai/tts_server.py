@@ -5,6 +5,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import soundfile as sf
+import torch
 from fastapi import FastAPI, HTTPException, Response
 from kokoro import KPipeline
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ MODEL_NAME = os.getenv("LOCAL_TTS_MODEL", "hexgrad/Kokoro-82M")
 DEFAULT_VOICE = os.getenv("LOCAL_TTS_VOICE", "af_heart")
 DEFAULT_LANG_CODE = os.getenv("LOCAL_TTS_LANG_CODE", "a")
 DEFAULT_SPEED = float(os.getenv("LOCAL_TTS_SPEED", "1"))
+REQUESTED_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 PORT = int(os.getenv("LOCAL_TTS_PORT", "8002"))
 SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
 
@@ -31,9 +33,25 @@ class SynthesizeRequest(BaseModel):
 def get_pipeline(lang_code: str) -> KPipeline:
     pipeline = pipelines.get(lang_code)
     if pipeline is None:
-        pipeline = KPipeline(lang_code=lang_code)
+        pipeline = KPipeline(lang_code=lang_code, device=resolve_device())
         pipelines[lang_code] = pipeline
     return pipeline
+
+
+def resolve_device() -> str:
+    if REQUESTED_DEVICE == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    if REQUESTED_DEVICE not in {"cpu", "cuda", "mps"}:
+        raise RuntimeError(
+            "LOCAL_TTS_DEVICE must be one of: auto, cpu, cuda, mps"
+        )
+
+    return REQUESTED_DEVICE
 
 
 @app.get("/health")
@@ -44,6 +62,10 @@ def health():
         "model": MODEL_NAME,
         "voice": DEFAULT_VOICE,
         "langCode": DEFAULT_LANG_CODE,
+        "requestedDevice": REQUESTED_DEVICE,
+        "effectiveDevice": resolve_device(),
+        "torchCudaAvailable": torch.cuda.is_available(),
+        "torchCudaVersion": torch.version.cuda,
         "sampleRate": SAMPLE_RATE,
         "loadedLanguages": sorted(pipelines.keys()),
     }
