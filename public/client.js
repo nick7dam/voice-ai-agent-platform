@@ -1,7 +1,9 @@
 const vadConfig = {
   minSpeechThreshold: 0.025,
   noiseMultiplier: 3,
-  silenceMs: 700,
+  silenceMs: 500,
+  maxUtteranceMs: 6500,
+  endThresholdPeakRatio: 0.32,
   minUtteranceMs: 450,
   minSpeechMs: 300,
   minAudioBytes: 2500,
@@ -383,6 +385,12 @@ function shouldStartUtterance(level, threshold, deltaMs) {
 
   state.bargeInCandidateStartedAt += deltaMs;
   return state.bargeInCandidateStartedAt >= vadConfig.bargeInHoldMs;
+}
+
+function isUtteranceSpeech(level, threshold, turn) {
+  const peakAwareThreshold =
+    turn.maxLevel > 0 ? turn.maxLevel * vadConfig.endThresholdPeakRatio : 0;
+  return level >= Math.max(threshold, peakAwareThreshold);
 }
 
 function markAssistantAudioCancelled(turnId) {
@@ -1051,7 +1059,6 @@ function runVadLoop() {
 
   if (speechDetected) {
     const startingNewUtterance = !state.currentTurn && !state.stoppingRecorder;
-    state.lastVoiceAt = now;
     if (startingNewUtterance) {
       startUtteranceRecorder(speechThreshold);
     }
@@ -1062,7 +1069,8 @@ function runVadLoop() {
     state.currentTurn.levelSum += level;
     state.currentTurn.maxLevel = Math.max(state.currentTurn.maxLevel, level);
 
-    if (speechDetected) {
+    if (isUtteranceSpeech(level, speechThreshold, state.currentTurn)) {
+      state.lastVoiceAt = now;
       state.currentTurn.speechMs += deltaMs;
     }
   }
@@ -1074,8 +1082,9 @@ function runVadLoop() {
     maybeSendPartialTranscript(state.currentTurn, now);
 
     if (
-      silenceForMs >= vadConfig.silenceMs &&
-      utteranceMs >= vadConfig.minUtteranceMs
+      (silenceForMs >= vadConfig.silenceMs &&
+        utteranceMs >= vadConfig.minUtteranceMs) ||
+      utteranceMs >= vadConfig.maxUtteranceMs
     ) {
       void stopUtteranceRecorder(true);
     }
