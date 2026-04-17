@@ -37,7 +37,7 @@ export const envSchema = z.object({
   TTS_PLAYBACK_MODE: z
     .enum(['first_sentence', 'first_segment', 'full'])
     .default('first_sentence'),
-  TTS_CONCURRENCY: z.coerce.number().int().positive().max(5).default(2),
+  TTS_CONCURRENCY: z.coerce.number().int().positive().max(5).default(1),
   TTS_CACHE_ENABLED: booleanFromEnv.default(true),
   TTS_ESTIMATED_PRICE_PER_MILLION_CHARS: z.coerce
     .number()

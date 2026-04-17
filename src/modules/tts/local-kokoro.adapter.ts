@@ -54,7 +54,7 @@ export class LocalKokoroAdapter implements TtsAdapter {
 
       const latencyMs = elapsedMs(startedAt);
       this.logger.log(
-        `tts.local.end model=${this.config.tts.model} voice=${this.config.tts.voice} segment=${input.segmentIndex + 1}/${input.segmentTotal} latencyMs=${latencyMs}`,
+        `tts.local.end model=${this.config.tts.model} voice=${this.config.tts.voice} segment=${input.segmentIndex + 1}/${input.segmentTotal} chars=${input.text.length} device=${this.headerValue(response.headers['x-device']) ?? 'unknown'} audioSeconds=${this.headerValue(response.headers['x-audio-seconds']) ?? 'unknown'} serverLoadLatencyMs=${this.headerValue(response.headers['x-load-latency-ms']) ?? 'unknown'} serverSynthLatencyMs=${this.headerValue(response.headers['x-synthesis-latency-ms']) ?? 'unknown'} serverEncodeLatencyMs=${this.headerValue(response.headers['x-encode-latency-ms']) ?? 'unknown'} latencyMs=${latencyMs}`,
       );
 
       return {
@@ -84,5 +84,15 @@ export class LocalKokoroAdapter implements TtsAdapter {
         },
       );
     }
+  }
+
+  private headerValue(
+    value: string | string[] | undefined,
+  ): string | undefined {
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+
+    return value;
   }
 }

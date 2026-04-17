@@ -76,10 +76,12 @@ OLLAMA_THINK=false
 
 TTS_PROVIDER=local_kokoro
 TTS_ENABLED=true
+TTS_CONCURRENCY=1
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M
 LOCAL_TTS_VOICE=af_heart
 LOCAL_TTS_BASE_URL=http://localhost:8002
 LOCAL_TTS_DEVICE=auto
+LOCAL_TTS_PRELOAD=true
 ```
 
 Recommended model names:
@@ -108,6 +110,12 @@ deactivate
 Use Python 3.12 for these virtualenvs. Python 3.14 is currently too new for
 some of the audio/ML wheels used by faster-whisper and Kokoro.
 
+On an NVIDIA host, install the STT CUDA runtime wheels:
+
+```bash
+.venv-stt/bin/python -m pip install -r services/local-ai/requirements-stt-cuda.txt
+```
+
 Run local STT:
 
 ```bash
@@ -123,6 +131,7 @@ Run local TTS:
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
 LOCAL_TTS_DEVICE=auto \
+LOCAL_TTS_PRELOAD=true \
 pnpm local:tts
 ```
 
@@ -137,15 +146,14 @@ For an NVIDIA CUDA host, install a CUDA-capable CTranslate2 build and run STT
 with:
 
 ```bash
-LOCAL_STT_DEVICE=cuda \
-LOCAL_STT_COMPUTE_TYPE=float16 \
-pnpm local:stt
+pnpm local:stt:cuda
 ```
 
 Run local TTS with CUDA:
 
 ```bash
 LOCAL_TTS_DEVICE=cuda \
+LOCAL_TTS_PRELOAD=true \
 pnpm local:tts
 ```
 
@@ -172,6 +180,7 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 `MIN_STT_AUDIO_BYTES` is a backend guard: turns smaller than this are discarded before STT.
 `TTS_ENABLED` controls optional speech playback. Text is still emitted first as `assistant.response`.
 `TTS_PLAYBACK_MODE=first_sentence` keeps voice latency low by speaking only the first sentence. Use `first_segment` for the first 200-character chunk or `full` to synthesize the full response.
+`TTS_CONCURRENCY=1` is recommended for local Kokoro so multiple audio chunks do not fight for the same GPU.
 
 ## Run
 

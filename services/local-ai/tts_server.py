@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import time
 from typing import Dict, Optional
@@ -16,9 +17,23 @@ DEFAULT_VOICE = os.getenv("LOCAL_TTS_VOICE", "af_heart")
 DEFAULT_LANG_CODE = os.getenv("LOCAL_TTS_LANG_CODE", "a")
 DEFAULT_SPEED = float(os.getenv("LOCAL_TTS_SPEED", "1"))
 REQUESTED_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
+PRELOAD = os.getenv("LOCAL_TTS_PRELOAD", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+WARMUP_TEXT = os.getenv("LOCAL_TTS_WARMUP_TEXT", "Ready.")
+THREADS = os.getenv("LOCAL_TTS_TORCH_THREADS")
 PORT = int(os.getenv("LOCAL_TTS_PORT", "8002"))
 SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
 
+logging.basicConfig(level=os.getenv("LOCAL_TTS_LOG_LEVEL", "INFO").upper())
+
+if THREADS:
+    torch.set_num_threads(int(THREADS))
+
+logger = logging.getLogger("local_kokoro_tts")
 app = FastAPI(title="Local Kokoro TTS")
 pipelines: Dict[str, KPipeline] = {}
 
@@ -33,9 +48,20 @@ class SynthesizeRequest(BaseModel):
 def get_pipeline(lang_code: str) -> KPipeline:
     pipeline = pipelines.get(lang_code)
     if pipeline is None:
+        started_at = time.perf_counter()
         pipeline = KPipeline(lang_code=lang_code, device=resolve_device())
         pipelines[lang_code] = pipeline
+        logger.info(
+            "tts.pipeline.loaded lang=%s device=%s latencyMs=%d",
+            lang_code,
+            resolve_device(),
+            elapsed_ms(started_at),
+        )
     return pipeline
+
+
+def elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
 
 
 def resolve_device() -> str:
@@ -54,6 +80,60 @@ def resolve_device() -> str:
     return REQUESTED_DEVICE
 
 
+def generate_audio(text: str, voice: str, lang_code: str, speed: float):
+    load_started_at = time.perf_counter()
+    pipeline = get_pipeline(lang_code)
+    load_latency_ms = elapsed_ms(load_started_at)
+
+    synth_started_at = time.perf_counter()
+    with torch.inference_mode():
+        generator = pipeline(text, voice=voice, speed=speed)
+        audio_parts = []
+
+        for _, _, audio in generator:
+            if hasattr(audio, "detach"):
+                audio = audio.detach().cpu().numpy()
+            audio_parts.append(np.asarray(audio, dtype=np.float32))
+
+    synth_latency_ms = elapsed_ms(synth_started_at)
+
+    if not audio_parts:
+        raise HTTPException(status_code=500, detail="Kokoro returned no audio")
+
+    audio = (
+        audio_parts[0]
+        if len(audio_parts) == 1
+        else np.concatenate(audio_parts)
+    )
+
+    return audio, load_latency_ms, synth_latency_ms
+
+
+def warmup():
+    started_at = time.perf_counter()
+    audio, load_latency_ms, synth_latency_ms = generate_audio(
+        WARMUP_TEXT,
+        DEFAULT_VOICE,
+        DEFAULT_LANG_CODE,
+        DEFAULT_SPEED,
+    )
+    logger.info(
+        "tts.warmup.end device=%s chars=%d audioSeconds=%.2f loadLatencyMs=%d synthLatencyMs=%d latencyMs=%d",
+        resolve_device(),
+        len(WARMUP_TEXT),
+        len(audio) / SAMPLE_RATE,
+        load_latency_ms,
+        synth_latency_ms,
+        elapsed_ms(started_at),
+    )
+
+
+@app.on_event("startup")
+def startup():
+    if PRELOAD:
+        warmup()
+
+
 @app.get("/health")
 def health():
     return {
@@ -66,7 +146,22 @@ def health():
         "effectiveDevice": resolve_device(),
         "torchCudaAvailable": torch.cuda.is_available(),
         "torchCudaVersion": torch.version.cuda,
+        "preload": PRELOAD,
+        "warmupText": WARMUP_TEXT,
+        "torchThreads": torch.get_num_threads(),
         "sampleRate": SAMPLE_RATE,
+        "loadedLanguages": sorted(pipelines.keys()),
+    }
+
+
+@app.post("/warmup")
+def warmup_endpoint():
+    started_at = time.perf_counter()
+    warmup()
+    return {
+        "status": "ok",
+        "latencyMs": elapsed_ms(started_at),
+        "effectiveDevice": resolve_device(),
         "loadedLanguages": sorted(pipelines.keys()),
     }
 
@@ -82,28 +177,32 @@ def synthesize(request: SynthesizeRequest):
     voice = request.voice or DEFAULT_VOICE
     lang_code = request.langCode or DEFAULT_LANG_CODE
     speed = request.speed or DEFAULT_SPEED
-    pipeline = get_pipeline(lang_code)
 
     try:
-        generator = pipeline(text, voice=voice, speed=speed)
-        audio_parts = []
-
-        for _, _, audio in generator:
-            if hasattr(audio, "detach"):
-                audio = audio.detach().cpu().numpy()
-            audio_parts.append(np.asarray(audio, dtype=np.float32))
-
-        if not audio_parts:
-            raise HTTPException(status_code=500, detail="Kokoro returned no audio")
-
-        audio = (
-            audio_parts[0]
-            if len(audio_parts) == 1
-            else np.concatenate(audio_parts)
+        audio, load_latency_ms, synth_latency_ms = generate_audio(
+            text,
+            voice,
+            lang_code,
+            speed,
         )
+        encode_started_at = time.perf_counter()
         wav = io.BytesIO()
         sf.write(wav, audio, SAMPLE_RATE, format="WAV")
-        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        encode_latency_ms = elapsed_ms(encode_started_at)
+        latency_ms = elapsed_ms(started_at)
+        audio_seconds = len(audio) / SAMPLE_RATE
+
+        logger.info(
+            "tts.synthesize.end device=%s voice=%s chars=%d audioSeconds=%.2f loadLatencyMs=%d synthLatencyMs=%d encodeLatencyMs=%d latencyMs=%d",
+            resolve_device(),
+            voice,
+            len(text),
+            audio_seconds,
+            load_latency_ms,
+            synth_latency_ms,
+            encode_latency_ms,
+            latency_ms,
+        )
 
         return Response(
             content=wav.getvalue(),
@@ -111,6 +210,12 @@ def synthesize(request: SynthesizeRequest):
             headers={
                 "X-Model": MODEL_NAME,
                 "X-Voice": voice,
+                "X-Device": resolve_device(),
+                "X-Text-Chars": str(len(text)),
+                "X-Audio-Seconds": f"{audio_seconds:.3f}",
+                "X-Load-Latency-Ms": str(load_latency_ms),
+                "X-Synthesis-Latency-Ms": str(synth_latency_ms),
+                "X-Encode-Latency-Ms": str(encode_latency_ms),
                 "X-Latency-Ms": str(latency_ms),
             },
         )

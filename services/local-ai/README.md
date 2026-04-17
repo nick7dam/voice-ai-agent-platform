@@ -44,6 +44,12 @@ deactivate
 Use Python 3.12 for these virtualenvs. Python 3.14 is currently too new for
 some of the audio/ML wheels used by faster-whisper and Kokoro.
 
+On an NVIDIA host, install the extra CUDA runtime wheels into the STT venv:
+
+```bash
+.venv-stt/bin/python -m pip install -r services/local-ai/requirements-stt-cuda.txt
+```
+
 The first request downloads model files into the Hugging Face cache unless they
 are already present.
 
@@ -64,6 +70,7 @@ TTS:
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
 LOCAL_TTS_DEVICE=auto \
+LOCAL_TTS_PRELOAD=true \
 .venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
@@ -80,17 +87,28 @@ For an NVIDIA CUDA host, install a CUDA-capable CTranslate2 build and run STT
 with:
 
 ```bash
-LOCAL_STT_DEVICE=cuda \
-LOCAL_STT_COMPUTE_TYPE=float16 \
-.venv-stt/bin/python services/local-ai/stt_server.py
+.venv-stt/bin/python -m pip install -r services/local-ai/requirements-stt-cuda.txt
+export LD_LIBRARY_PATH="$(.venv-stt/bin/python scripts/print-cuda-library-path.py):${LD_LIBRARY_PATH:-}"
+LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 .venv-stt/bin/python services/local-ai/stt_server.py
+```
+
+Or use the pnpm helper, which sets `LD_LIBRARY_PATH` for the process:
+
+```bash
+pnpm local:stt:cuda
 ```
 
 Run local TTS on CUDA:
 
 ```bash
 LOCAL_TTS_DEVICE=cuda \
+LOCAL_TTS_PRELOAD=true \
 .venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
 CPU STT is usable for testing, but a GPU instance is much better for production
 latency.
+
+The TTS service preloads and warms Kokoro by default. Use `/health` to confirm
+`effectiveDevice` and `torchCudaAvailable`, and `/warmup` if you want to warm it
+again after startup.
