@@ -96,7 +96,7 @@ export class SessionsService {
   ): string {
     const session = this.get(sessionId);
 
-    if (!session.audio.turnId || session.audio.chunks.length === 0) {
+    if (!session.audio.turnId) {
       this.beginTurn(sessionId);
     }
 

@@ -13,6 +13,10 @@ const vadConfig = {
   bargeInMinSpeechMs: 500,
   chunkMs: 100,
   prerollMs: 500,
+  partialTranscriptMs: 1200,
+  partialTranscriptMinMs: 900,
+  partialTranscriptMaxMs: 6000,
+  partialTranscriptMinNewMs: 600,
 };
 
 const state = {
@@ -46,6 +50,7 @@ const state = {
   audioPlaybackToken: 0,
   pendingTurnEnd: false,
   stoppingRecorder: false,
+  latestPartialTranscript: '',
   mimeType: 'audio/wav',
   sampleRate: 48000,
   pendingDebugText: '',
@@ -292,6 +297,22 @@ async function sendAudioBlob(blob, mimeType = state.mimeType) {
       audioBase64: await blobToBase64(blob),
       mimeType,
       sampleRate: state.sampleRate,
+    },
+  });
+}
+
+async function sendPartialAudioBlob(blob, sequence, mimeType = state.mimeType) {
+  if (!blob.size || !state.sessionId) {
+    return;
+  }
+
+  send({
+    type: 'audio.partial',
+    payload: {
+      audioBase64: await blobToBase64(blob),
+      mimeType,
+      sampleRate: state.sampleRate,
+      sequence,
     },
   });
 }
@@ -624,6 +645,9 @@ function createTurn(now, thresholdAtStart) {
     levelSum: 0,
     levelFrames: 0,
     startedDuringAssistantOutput,
+    partialSequence: 0,
+    lastPartialSentAt: 0,
+    lastPartialSampleCount: 0,
   };
 }
 
@@ -638,6 +662,15 @@ function startUtteranceRecorder(thresholdAtStart) {
   state.stoppingRecorder = false;
   state.recordingStartedAt = now;
   state.lastVoiceAt = state.recordingStartedAt;
+  state.latestPartialTranscript = '';
+
+  send({
+    type: 'audio.turn_start',
+    payload: {
+      mimeType: state.mimeType,
+      sampleRate: state.sampleRate,
+    },
+  });
 
   setStatus('Listening: speech detected');
   updateButtons();
@@ -760,6 +793,71 @@ function encodeWav(chunks, sampleRate) {
   return new Blob([buffer], { type: 'audio/wav' });
 }
 
+function selectRecentChunks(chunks, maxSamples) {
+  const selected = [];
+  let remaining = maxSamples;
+
+  for (let index = chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const chunk = chunks[index];
+
+    if (chunk.length <= remaining) {
+      selected.unshift(chunk);
+      remaining -= chunk.length;
+      continue;
+    }
+
+    selected.unshift(chunk.slice(chunk.length - remaining));
+    remaining = 0;
+  }
+
+  return selected;
+}
+
+function maybeSendPartialTranscript(turn, now) {
+  if (!state.sessionId || !state.streamActive) {
+    return;
+  }
+
+  if (now - state.lastVoiceAt > 250) {
+    return;
+  }
+
+  const durationMs = (turn.sampleCount / state.sampleRate) * 1000;
+  if (durationMs < vadConfig.partialTranscriptMinMs) {
+    return;
+  }
+
+  if (now - turn.lastPartialSentAt < vadConfig.partialTranscriptMs) {
+    return;
+  }
+
+  const minNewSamples = Math.round(
+    (state.sampleRate * vadConfig.partialTranscriptMinNewMs) / 1000,
+  );
+  if (turn.sampleCount - turn.lastPartialSampleCount < minNewSamples) {
+    return;
+  }
+
+  const maxSamples = Math.round(
+    (state.sampleRate * vadConfig.partialTranscriptMaxMs) / 1000,
+  );
+  const chunks = selectRecentChunks(turn.chunks, maxSamples);
+
+  if (chunks.length === 0) {
+    return;
+  }
+
+  turn.partialSequence += 1;
+  turn.lastPartialSentAt = now;
+  turn.lastPartialSampleCount = turn.sampleCount;
+
+  void sendPartialAudioBlob(
+    encodeWav(chunks, state.sampleRate),
+    turn.partialSequence,
+    'audio/wav',
+  );
+}
+
 async function finalizeUtterance(turn) {
   const result = evaluateUtterance(turn);
 
@@ -825,6 +923,8 @@ function runVadLoop() {
   if (state.currentTurn) {
     const silenceForMs = now - state.lastVoiceAt;
     const utteranceMs = now - state.recordingStartedAt;
+
+    maybeSendPartialTranscript(state.currentTurn, now);
 
     if (
       silenceForMs >= vadConfig.silenceMs &&
@@ -1016,7 +1116,16 @@ el.connect.addEventListener('click', () => {
         appendChatMessage('user', transcript);
       }
       state.pendingDebugText = '';
+      state.latestPartialTranscript = '';
       setStatus(`Heard: ${event.payload.text || '(empty)'}`);
+    }
+
+    if (event.type === 'transcript.partial') {
+      const transcript = event.payload.text || '';
+      if (transcript && transcript !== state.latestPartialTranscript) {
+        state.latestPartialTranscript = transcript;
+        setStatus(`Hearing: ${transcript}`);
+      }
     }
 
     if (event.type === 'assistant.response') {

@@ -4,6 +4,8 @@ export type ClientEventType =
   | 'session.start'
   | 'audio.stream_start'
   | 'audio.stream_stop'
+  | 'audio.turn_start'
+  | 'audio.partial'
   | 'audio.chunk'
   | 'audio.turn_end'
   | 'text.message'
@@ -20,6 +22,7 @@ export type ServerEventType =
   | 'audio.stream.stopped'
   | 'audio.chunk.received'
   | 'audio.turn.discarded'
+  | 'transcript.partial'
   | 'transcript.final'
   | 'reasoning.started'
   | 'tool.called'
@@ -44,6 +47,19 @@ export type ClientEvent =
     >
   | BaseClientEvent<'audio.stream_start', { mimeType?: string }>
   | BaseClientEvent<'audio.stream_stop', Record<string, never>>
+  | BaseClientEvent<
+      'audio.turn_start',
+      { mimeType?: string; sampleRate?: number }
+    >
+  | BaseClientEvent<
+      'audio.partial',
+      {
+        audioBase64: string;
+        mimeType?: string;
+        sampleRate?: number;
+        sequence: number;
+      }
+    >
   | BaseClientEvent<
       'audio.chunk',
       {
@@ -84,6 +100,10 @@ export type ServerEvent =
   | BaseServerEvent<
       'audio.chunk.received',
       { bytes: number; turnId: string; bufferedBytes: number }
+    >
+  | BaseServerEvent<
+      'transcript.partial',
+      { turnId: string; text: string; latencyMs: number; sequence: number }
     >
   | BaseServerEvent<
       'transcript.final',

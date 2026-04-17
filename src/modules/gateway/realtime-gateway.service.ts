@@ -29,6 +29,7 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RealtimeGatewayService.name);
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly clients = new Map<WebSocket, ClientContext>();
+  private readonly partialTranscriptions = new Set<string>();
   private httpServer?: HttpServer;
 
   constructor(
@@ -123,6 +124,12 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
         return;
       case 'audio.stream_stop':
         this.handleAudioStreamStop(client, event);
+        return;
+      case 'audio.turn_start':
+        this.handleAudioTurnStart(client, event);
+        return;
+      case 'audio.partial':
+        await this.handleAudioPartial(client, event);
         return;
       case 'audio.chunk':
         await this.handleAudioChunk(client, event);
@@ -239,6 +246,91 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
       timestamp: nowIso(),
       payload: {},
     });
+  }
+
+  private handleAudioTurnStart(
+    client: WebSocket,
+    event: Extract<ParsedClientEvent, { type: 'audio.turn_start' }>,
+  ): void {
+    const sessionId = this.resolveSessionId(client, event);
+    const turnId = this.sessions.beginTurn(sessionId);
+    this.sessions.ensureAudioTurn(
+      sessionId,
+      event.payload?.mimeType,
+      event.payload?.sampleRate,
+    );
+
+    this.logger.log(`audio.turn.start session=${sessionId} turn=${turnId}`);
+  }
+
+  private async handleAudioPartial(
+    client: WebSocket,
+    event: Extract<ParsedClientEvent, { type: 'audio.partial' }>,
+  ): Promise<void> {
+    const sessionId = this.resolveSessionId(client, event);
+    const session = this.sessions.get(sessionId);
+    const turnId =
+      session.audio.turnId ??
+      this.sessions.ensureAudioTurn(
+        sessionId,
+        event.payload.mimeType,
+        event.payload.sampleRate,
+      );
+    const audio = Buffer.from(event.payload.audioBase64, 'base64');
+
+    if (audio.byteLength < this.config.minSttAudioBytes) {
+      return;
+    }
+
+    const partialKey = `${sessionId}:${turnId}`;
+    if (this.partialTranscriptions.has(partialKey)) {
+      return;
+    }
+
+    this.partialTranscriptions.add(partialKey);
+
+    try {
+      const transcription = await this.stt.transcribeTurn({
+        sessionId,
+        turnId,
+        audio,
+        mimeType: event.payload.mimeType ?? session.audio.mimeType,
+        sampleRate: event.payload.sampleRate ?? session.audio.sampleRate,
+      });
+
+      const current = this.sessions.get(sessionId);
+      if (
+        current.currentState !== 'listening' ||
+        !this.sessions.isCurrentTurn(sessionId, turnId)
+      ) {
+        return;
+      }
+
+      const text = transcription.text.trim();
+      if (!text) {
+        return;
+      }
+
+      this.send(client, {
+        type: 'transcript.partial',
+        sessionId,
+        requestId: event.requestId,
+        timestamp: nowIso(),
+        payload: {
+          turnId,
+          text,
+          latencyMs: transcription.latencyMs,
+          sequence: event.payload.sequence,
+        },
+      });
+    } catch (error) {
+      const payload = toErrorPayload(error);
+      this.logger.warn(
+        `transcript.partial.error session=${sessionId} turn=${turnId} code=${payload.code} message=${payload.message}`,
+      );
+    } finally {
+      this.partialTranscriptions.delete(partialKey);
+    }
   }
 
   private handleBinaryAudio(client: WebSocket, chunk: Buffer): void {

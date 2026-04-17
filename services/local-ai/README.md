@@ -61,6 +61,8 @@ STT:
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3 \
 LOCAL_STT_DEVICE=cpu \
 LOCAL_STT_COMPUTE_TYPE=int8 \
+LOCAL_STT_PRELOAD=true \
+LOCAL_STT_WARMUP=true \
 .venv-stt/bin/python services/local-ai/stt_server.py
 ```
 
@@ -89,7 +91,7 @@ with:
 ```bash
 .venv-stt/bin/python -m pip install -r services/local-ai/requirements-stt-cuda.txt
 export LD_LIBRARY_PATH="$(.venv-stt/bin/python scripts/print-cuda-library-path.py):${LD_LIBRARY_PATH:-}"
-LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 .venv-stt/bin/python services/local-ai/stt_server.py
+LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_STT_PRELOAD=true LOCAL_STT_WARMUP=true .venv-stt/bin/python services/local-ai/stt_server.py
 ```
 
 Or use the pnpm helper, which sets `LD_LIBRARY_PATH` for the process:
@@ -108,6 +110,10 @@ LOCAL_TTS_PRELOAD=true \
 
 CPU STT is usable for testing, but a GPU instance is much better for production
 latency.
+
+The STT service preloads and warms Whisper by default. Use `/health` to confirm
+`device`, `computeType`, and `loaded`, and `/warmup` if you want to warm it
+again after startup.
 
 The TTS service preloads and warms Kokoro by default. Use `/health` to confirm
 `effectiveDevice` and `torchCudaAvailable`, and `/warmup` if you want to warm it

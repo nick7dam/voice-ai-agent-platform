@@ -1,5 +1,8 @@
 import base64
+import io
+import logging
 import os
+import wave
 import tempfile
 import time
 from pathlib import Path
@@ -15,6 +18,18 @@ DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_COMPUTE_TYPE)
 PORT = int(os.getenv("LOCAL_STT_PORT", "8003"))
+PRELOAD = os.getenv("LOCAL_STT_PRELOAD", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+WARMUP = os.getenv("LOCAL_STT_WARMUP", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 VAD_FILTER = os.getenv("LOCAL_STT_VAD_FILTER", "true").lower() in {
     "1",
     "true",
@@ -22,6 +37,9 @@ VAD_FILTER = os.getenv("LOCAL_STT_VAD_FILTER", "true").lower() in {
     "on",
 }
 
+logging.basicConfig(level=os.getenv("LOCAL_STT_LOG_LEVEL", "INFO").upper())
+
+logger = logging.getLogger("local_whisper_stt")
 app = FastAPI(title="Local Whisper STT")
 model: Optional[WhisperModel] = None
 
@@ -38,6 +56,7 @@ class TranscribeRequest(BaseModel):
 def get_model() -> WhisperModel:
     global model
     if model is None:
+        started_at = time.perf_counter()
         try:
             model = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
         except ValueError as exc:
@@ -51,7 +70,68 @@ def get_model() -> WhisperModel:
                     "your NVIDIA host."
                 ) from exc
             raise
+        logger.info(
+            "stt.model.loaded model=%s device=%s computeType=%s latencyMs=%d",
+            MODEL_NAME,
+            DEVICE,
+            COMPUTE_TYPE,
+            elapsed_ms(started_at),
+        )
     return model
+
+
+def elapsed_ms(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
+
+
+def warmup_audio() -> bytes:
+    buffer = io.BytesIO()
+
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00\x00" * 16000)
+
+    return buffer.getvalue()
+
+
+def warmup_model() -> None:
+    started_at = time.perf_counter()
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        temp_file.write(warmup_audio())
+        temp_path = Path(temp_file.name)
+
+    try:
+        segments, _ = get_model().transcribe(
+            str(temp_path),
+            language="en",
+            beam_size=1,
+            best_of=1,
+            vad_filter=False,
+            condition_on_previous_text=False,
+        )
+        # Consume the generator so CUDA kernels and model paths are actually exercised.
+        _ = list(segments)
+        logger.info(
+            "stt.warmup.end model=%s device=%s computeType=%s latencyMs=%d",
+            MODEL_NAME,
+            DEVICE,
+            COMPUTE_TYPE,
+            elapsed_ms(started_at),
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+@app.on_event("startup")
+def startup():
+    if PRELOAD:
+        get_model()
+
+    if WARMUP:
+        warmup_model()
 
 
 def extension_for_mime(mime_type: str) -> str:
@@ -75,7 +155,23 @@ def health():
         "device": DEVICE,
         "computeType": COMPUTE_TYPE,
         "vadFilter": VAD_FILTER,
+        "preload": PRELOAD,
+        "warmup": WARMUP,
         "loaded": model is not None,
+    }
+
+
+@app.post("/warmup")
+def warmup_endpoint():
+    started_at = time.perf_counter()
+    warmup_model()
+    return {
+        "status": "ok",
+        "provider": "local_whisper",
+        "model": MODEL_NAME,
+        "device": DEVICE,
+        "computeType": COMPUTE_TYPE,
+        "latencyMs": elapsed_ms(started_at),
     }
 
 
@@ -104,7 +200,7 @@ def transcribe(request: TranscribeRequest):
             condition_on_previous_text=False,
         )
         text = " ".join(segment.text.strip() for segment in segments).strip()
-        latency_ms = int((time.perf_counter() - started_at) * 1000)
+        latency_ms = elapsed_ms(started_at)
 
         return {
             "text": text,

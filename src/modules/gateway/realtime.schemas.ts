@@ -42,6 +42,26 @@ export const clientEventSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     ...eventBase,
+    type: z.literal('audio.turn_start'),
+    payload: z
+      .object({
+        mimeType: z.string().optional(),
+        sampleRate: z.number().int().positive().optional(),
+      })
+      .optional(),
+  }),
+  z.object({
+    ...eventBase,
+    type: z.literal('audio.partial'),
+    payload: z.object({
+      audioBase64: z.string(),
+      mimeType: z.string().optional(),
+      sampleRate: z.number().int().positive().optional(),
+      sequence: z.number().int().nonnegative(),
+    }),
+  }),
+  z.object({
+    ...eventBase,
     type: z.literal('audio.turn_end'),
     payload: z.record(z.string(), z.never()).optional(),
   }),

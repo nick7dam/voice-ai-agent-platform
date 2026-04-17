@@ -65,6 +65,8 @@ The default `.env.example` is configured for a fully local model stack:
 STT_PROVIDER=local_whisper
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
 LOCAL_STT_BASE_URL=http://localhost:8001
+LOCAL_STT_PRELOAD=true
+LOCAL_STT_WARMUP=true
 
 REASONING_PROVIDER=ollama
 OLLAMA_MODEL=llama3.2:3b
@@ -178,6 +180,8 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 `OLLAMA_KEEP_ALIVE` keeps the model loaded after a request so the next turn avoids a cold start.
 `OLLAMA_THINK=false` disables supported model thinking output/effort, which is useful for low-latency voice turns.
 `MIN_STT_AUDIO_BYTES` is a backend guard: turns smaller than this are discarded before STT.
+`LOCAL_STT_PRELOAD=true` and `LOCAL_STT_WARMUP=true` load and exercise Whisper when the service starts, so GPU/library problems fail fast instead of during the first user turn.
+The browser sends throttled `audio.partial` snapshots while speech is active. The backend emits `transcript.partial` for live feedback, then waits for `audio.turn_end` before sending the final transcript to reasoning.
 `TTS_ENABLED` controls optional speech playback. Text is still emitted first as `assistant.response`.
 `TTS_PLAYBACK_MODE=first_sentence` keeps voice latency low by speaking only the first sentence. Use `first_segment` for the first 200-character chunk or `full` to synthesize the full response.
 `TTS_CONCURRENCY=1` is recommended for local Kokoro so multiple audio chunks do not fight for the same GPU.
@@ -260,6 +264,23 @@ Client starts a continuous audio stream:
 
 Client sends an accepted utterance:
 
+Before the final utterance is sent, the browser may send repeated partial STT snapshots while speech is active:
+
+```json
+{
+  "type": "audio.partial",
+  "sessionId": "...",
+  "payload": {
+    "audioBase64": "...",
+    "mimeType": "audio/wav",
+    "sampleRate": 48000,
+    "sequence": 1
+  }
+}
+```
+
+The server responds with `transcript.partial` events for UI feedback only. Reasoning still starts after the final transcript.
+
 ```json
 {
   "type": "audio.chunk",
@@ -282,6 +303,7 @@ Server emits:
 
 ```text
 audio.stream.started
+transcript.partial optional, repeated during speech
 audio.chunk.received
 transcript.final
 reasoning.started
