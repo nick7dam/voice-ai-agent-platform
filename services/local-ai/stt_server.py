@@ -17,7 +17,7 @@ MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "Systran/faster-distil-whisper-large-v
 DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_COMPUTE_TYPE)
-PORT = int(os.getenv("LOCAL_STT_PORT", "8001"))
+PORT = int(os.getenv("LOCAL_STT_PORT", "8003"))
 PRELOAD = os.getenv("LOCAL_STT_PRELOAD", "true").lower() in {
     "1",
     "true",
