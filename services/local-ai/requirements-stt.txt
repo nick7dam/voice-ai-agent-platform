@@ -1,0 +1,7 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+faster-whisper==1.2.1
+onnxruntime>=1.23.0,<2
+ctranslate2>=4.7.0,<5
+numpy>=1.26.0,<3
+pydantic>=2.8.0

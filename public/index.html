@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voice Agent Local Demo</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        background: #f7f8fb;
+        color: #17202a;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      main {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: minmax(280px, 420px) minmax(320px, 1fr);
+        gap: 24px;
+        padding: 32px;
+        box-sizing: border-box;
+      }
+
+      section {
+        min-width: 0;
+      }
+
+      h1 {
+        font-size: 28px;
+        margin: 0 0 10px;
+      }
+
+      p {
+        line-height: 1.5;
+      }
+
+      label {
+        display: block;
+        margin: 18px 0 6px;
+        font-weight: 700;
+      }
+
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #b9c2cf;
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: #ffffff;
+        color: #17202a;
+      }
+
+      input[type='checkbox'] {
+        width: auto;
+      }
+
+      textarea {
+        min-height: 96px;
+        resize: vertical;
+      }
+
+      textarea.tall {
+        min-height: 150px;
+      }
+
+      .field-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .check-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 16px;
+        font-weight: 700;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 8px;
+        background: #167a61;
+        color: white;
+        padding: 10px 14px;
+        cursor: pointer;
+        min-height: 42px;
+      }
+
+      button.secondary {
+        background: #235789;
+      }
+
+      button.danger {
+        background: #a13d3d;
+      }
+
+      button:disabled {
+        background: #8b96a6;
+        cursor: not-allowed;
+      }
+
+      .status {
+        margin-top: 14px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #e8edf4;
+        min-height: 24px;
+      }
+
+      .task-status {
+        margin-top: 10px;
+        color: #435064;
+        min-height: 22px;
+      }
+
+      .meter {
+        height: 10px;
+        background: #d9e0ea;
+        border-radius: 8px;
+        overflow: hidden;
+        margin-top: 14px;
+      }
+
+      .meter div {
+        height: 100%;
+        width: 0%;
+        background: #167a61;
+        transition: width 80ms linear;
+      }
+
+      .event-log,
+      .assistant-output,
+      .chat-history {
+        background: #10151c;
+        color: #eaf0f6;
+        border-radius: 8px;
+        padding: 14px;
+        overflow: auto;
+        box-sizing: border-box;
+      }
+
+      .assistant-output {
+        min-height: 140px;
+        white-space: pre-wrap;
+        margin-bottom: 16px;
+      }
+
+      .chat-history {
+        min-height: 260px;
+        max-height: 42vh;
+        margin-bottom: 16px;
+      }
+
+      .chat-message {
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #1d2733;
+        white-space: pre-wrap;
+      }
+
+      .chat-message.user {
+        background: #173f36;
+      }
+
+      .chat-message.assistant {
+        background: #203957;
+      }
+
+      .chat-role {
+        display: block;
+        font-size: 12px;
+        font-weight: 700;
+        color: #b8c4d4;
+        margin-bottom: 4px;
+      }
+
+      .event-log {
+        height: 280px;
+        min-height: 260px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+      }
+
+      @media (max-width: 760px) {
+        main {
+          grid-template-columns: 1fr;
+          padding: 18px;
+        }
+
+        .event-log {
+          height: 360px;
+        }
+
+        .field-row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section>
+        <h1>Voice Agent Local Demo</h1>
+        <p>
+          Connect, start a session, and start live mic. Speech is grouped into
+          turns automatically, transcribed by the configured STT provider, and
+          answered as text.
+        </p>
+
+        <label for="wsUrl">WebSocket URL</label>
+        <input id="wsUrl" value="ws://localhost:3000/realtime" />
+
+        <label for="taskKey">Task key</label>
+        <input id="taskKey" value="general_voice_assistant" />
+
+        <div class="controls">
+          <button id="connect">Connect</button>
+          <button id="startSession" class="secondary" disabled>
+            Start session
+          </button>
+          <button id="startLive" disabled>Start live mic</button>
+          <button id="stopLive" class="danger" disabled>Stop live mic</button>
+        </div>
+
+        <div class="meter" aria-label="Microphone level">
+          <div id="micLevel"></div>
+        </div>
+
+        <label for="debugText">Text debug input</label>
+        <textarea id="debugText">What time is it in Melbourne?</textarea>
+        <div class="controls">
+          <button id="sendText" class="secondary" disabled>Send text</button>
+          <button id="toggleAudio" class="secondary" disabled>Audio on</button>
+          <button id="endSession" class="danger" disabled>End session</button>
+        </div>
+
+        <div id="status" class="status">Disconnected</div>
+
+        <h1>Task Settings</h1>
+        <p>
+          Edit the assistant purpose and policy used by this task. Saves apply
+          to the next turn for sessions using the same task key.
+        </p>
+
+        <label for="taskName">Assistant name</label>
+        <input id="taskName" />
+
+        <label for="systemPrompt">Purpose</label>
+        <textarea id="systemPrompt" class="tall"></textarea>
+
+        <label for="behaviorGuidelines">Behavior guidelines</label>
+        <textarea id="behaviorGuidelines"></textarea>
+
+        <label for="allowedTools">Allowed tools</label>
+        <textarea id="allowedTools"></textarea>
+
+        <div class="field-row">
+          <div>
+            <label for="responseStyle">Response style</label>
+            <input id="responseStyle" />
+          </div>
+          <div>
+            <label for="maxResponseChars">Max response chars</label>
+            <input id="maxResponseChars" type="number" min="1" max="4000" />
+          </div>
+        </div>
+
+        <label class="check-row" for="memoryEnabled">
+          <input id="memoryEnabled" type="checkbox" />
+          Memory enabled
+        </label>
+
+        <label for="maxFactsInPrompt">Max memory facts in prompt</label>
+        <input id="maxFactsInPrompt" type="number" min="0" max="50" />
+
+        <label for="memoryWritePolicy">Memory write policy</label>
+        <textarea id="memoryWritePolicy"></textarea>
+
+        <div class="controls">
+          <button id="loadTask" class="secondary">Load task</button>
+          <button id="saveTask">Save task</button>
+          <button id="resetTask" class="danger">Reset task</button>
+        </div>
+
+        <div id="taskStatus" class="task-status"></div>
+      </section>
+
+      <section>
+        <h1>Chat</h1>
+        <div id="chatHistory" class="chat-history"></div>
+        <h1>Latest Assistant Response</h1>
+        <div id="assistant" class="assistant-output"></div>
+        <h1>Events</h1>
+        <div id="events" class="event-log"></div>
+      </section>
+    </main>
+
+    <script src="/client.js"></script>
+  </body>
+</html>
