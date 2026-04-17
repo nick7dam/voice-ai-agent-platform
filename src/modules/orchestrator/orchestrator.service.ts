@@ -107,6 +107,7 @@ export class OrchestratorService {
                 if (
                   earlyAudioStarted ||
                   !this.tts.isEnabled() ||
+                  !this.tts.shouldEmitEarlyAudio() ||
                   !this.sessions.isAudioOutputEnabled(sessionId)
                 ) {
                   return;

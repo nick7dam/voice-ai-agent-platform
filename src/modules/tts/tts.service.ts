@@ -37,6 +37,10 @@ export class TtsService {
     return this.config.tts.concurrency;
   }
 
+  shouldEmitEarlyAudio(): boolean {
+    return this.config.tts.playbackMode !== 'full';
+  }
+
   splitText(text: string): TtsSegment[] {
     const normalized = text.replace(/\s+/g, ' ').trim();
 

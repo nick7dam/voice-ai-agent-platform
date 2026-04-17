@@ -97,9 +97,12 @@ export class OllamaAdapter implements LlmAdapter {
           ),
           tools: input.tools,
           stream: false,
+          think: this.config.ollama.think,
+          keep_alive: this.config.ollama.keepAlive,
           options: {
             temperature: input.temperature ?? 0.2,
-            num_predict: input.maxTokens,
+            num_predict: input.maxTokens ?? this.config.ollama.numPredict,
+            num_ctx: this.config.ollama.numCtx,
           },
         }),
         timeoutMs: this.config.ollama.requestTimeoutMs,

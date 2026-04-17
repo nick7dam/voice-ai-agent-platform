@@ -49,6 +49,10 @@ export interface AppConfig {
     model: string;
     requestTimeoutMs: number;
     healthTimeoutMs: number;
+    numPredict: number;
+    numCtx: number;
+    keepAlive: string;
+    think: boolean;
     configured: boolean;
   };
 }
@@ -119,6 +123,10 @@ export function loadAppConfig(): AppConfig {
       model: env.OLLAMA_MODEL,
       requestTimeoutMs: env.OLLAMA_REQUEST_TIMEOUT_MS,
       healthTimeoutMs: env.OLLAMA_HEALTH_TIMEOUT_MS,
+      numPredict: env.OLLAMA_NUM_PREDICT,
+      numCtx: env.OLLAMA_NUM_CTX,
+      keepAlive: env.OLLAMA_KEEP_ALIVE,
+      think: env.OLLAMA_THINK,
       configured:
         env.OLLAMA_BASE_URL.trim().length > 0 &&
         env.OLLAMA_MODEL.trim().length > 0,

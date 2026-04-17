@@ -48,14 +48,18 @@ export const envSchema = z.object({
   LOCAL_TTS_VOICE: z.string().min(1).default('af_heart'),
   LOCAL_TTS_SPEED: z.coerce.number().positive().default(1),
   LOCAL_TTS_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
-  OLLAMA_BASE_URL: z.string().url().default('http://192.168.1.66:11434'),
-  OLLAMA_MODEL: z.string().min(1).default('qwen3:8b'),
+  OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
+  OLLAMA_MODEL: z.string().min(1).default('llama3.2:3b'),
   OLLAMA_REQUEST_TIMEOUT_MS: z.coerce
     .number()
     .int()
     .positive()
     .default(180_000),
   OLLAMA_HEALTH_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  OLLAMA_NUM_PREDICT: z.coerce.number().int().positive().default(120),
+  OLLAMA_NUM_CTX: z.coerce.number().int().positive().default(2048),
+  OLLAMA_KEEP_ALIVE: z.string().min(1).default('30m'),
+  OLLAMA_THINK: booleanFromEnv.default(false),
   DEFAULT_TASK_KEY: z.string().min(1).default('general_voice_assistant'),
   TASK_CONFIG_PATH: z.string().min(1).default('data/tasks.local.json'),
   MAX_AUDIO_BUFFER_BYTES: z.coerce
