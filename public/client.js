@@ -7,7 +7,10 @@ const vadConfig = {
   minAudioBytes: 2500,
   minPeakLevel: 0.035,
   minBargeInLevel: 0.025,
-  bargeInThresholdMultiplier: 1,
+  bargeInThresholdMultiplier: 2.2,
+  bargeInHoldMs: 280,
+  bargeInMinPeakLevel: 0.06,
+  bargeInMinSpeechMs: 500,
   chunkMs: 100,
   prerollMs: 500,
 };
@@ -26,6 +29,7 @@ const state = {
   recordingStartedAt: 0,
   lastVoiceAt: 0,
   lastVadAt: 0,
+  bargeInCandidateStartedAt: 0,
   noiseFloor: 0.006,
   assistantBusy: false,
   assistantAudioActive: false,
@@ -331,9 +335,25 @@ function hasInterruptibleAssistantOutput() {
 
 function isLikelyBargeIn(level, threshold) {
   return (
+    level >= vadConfig.bargeInMinPeakLevel &&
     level >= vadConfig.minBargeInLevel &&
     level >= threshold * vadConfig.bargeInThresholdMultiplier
   );
+}
+
+function shouldStartUtterance(level, threshold, deltaMs) {
+  if (!hasAssistantVoiceOutput()) {
+    state.bargeInCandidateStartedAt = 0;
+    return level >= threshold;
+  }
+
+  if (!isLikelyBargeIn(level, threshold)) {
+    state.bargeInCandidateStartedAt = 0;
+    return false;
+  }
+
+  state.bargeInCandidateStartedAt += deltaMs;
+  return state.bargeInCandidateStartedAt >= vadConfig.bargeInHoldMs;
 }
 
 function markAssistantAudioCancelled(turnId) {
@@ -355,6 +375,7 @@ function stopAssistantAudio(options = {}) {
     markAssistantAudioCancelled(options.turnId);
   }
 
+  const hadOutput = hasAssistantVoiceOutput();
   state.audioPlaybackToken += 1;
   state.audioQueue = [];
 
@@ -371,6 +392,10 @@ function stopAssistantAudio(options = {}) {
   }
 
   state.audioPlaying = false;
+  if (hadOutput) {
+    state.prerollChunks = [];
+    state.bargeInCandidateStartedAt = 0;
+  }
 
   if (options.cancelTurn) {
     state.assistantAudioActive = false;
@@ -525,6 +550,8 @@ async function playNextAssistantAudio() {
     }
 
     state.audioPlaying = false;
+    state.prerollChunks = [];
+    state.bargeInCandidateStartedAt = 0;
     void playNextAssistantAudio();
   }
 }
@@ -573,9 +600,12 @@ function rememberPcmChunk(samples) {
 }
 
 function createTurn(now, thresholdAtStart) {
-  const preroll = state.prerollChunks.filter(
-    (chunk) => now - chunk.capturedAt <= vadConfig.prerollMs,
-  );
+  const startedDuringAssistantOutput = hasAssistantVoiceOutput();
+  const preroll = startedDuringAssistantOutput
+    ? []
+    : state.prerollChunks.filter(
+        (chunk) => now - chunk.capturedAt <= vadConfig.prerollMs,
+      );
   const chunks = preroll.map((chunk) => chunk.samples);
   const preRollSampleCount = preroll.reduce(
     (total, chunk) => total + chunk.sampleCount,
@@ -593,6 +623,7 @@ function createTurn(now, thresholdAtStart) {
     maxLevel: 0,
     levelSum: 0,
     levelFrames: 0,
+    startedDuringAssistantOutput,
   };
 }
 
@@ -644,8 +675,13 @@ async function stopUtteranceRecorder(sendTurnEnd) {
 }
 
 function evaluateUtterance(turn) {
+  const minSpeechMs = turn.startedDuringAssistantOutput
+    ? vadConfig.bargeInMinSpeechMs
+    : vadConfig.minSpeechMs;
   const requiredPeak = Math.max(
-    vadConfig.minPeakLevel,
+    turn.startedDuringAssistantOutput
+      ? vadConfig.bargeInMinPeakLevel
+      : vadConfig.minPeakLevel,
     turn.thresholdAtStart * 1.15,
   );
   const reasons = [];
@@ -658,7 +694,7 @@ function evaluateUtterance(turn) {
     reasons.push('too_few_audio_bytes');
   }
 
-  if (turn.speechMs < vadConfig.minSpeechMs) {
+  if (turn.speechMs < minSpeechMs) {
     reasons.push('speech_too_short');
   }
 
@@ -677,8 +713,10 @@ function evaluateUtterance(turn) {
         (turn.levelFrames ? turn.levelSum / turn.levelFrames : 0).toFixed(4),
       ),
       preRollBytes: turn.preRollBytes,
+      startedDuringAssistantOutput: turn.startedDuringAssistantOutput,
       thresholdAtStart: Number(turn.thresholdAtStart.toFixed(4)),
       requiredPeak: Number(requiredPeak.toFixed(4)),
+      minSpeechMs,
     },
   };
 }
@@ -764,17 +802,14 @@ function runVadLoop() {
   updateMicMeter(level);
   updateNoiseFloor(level);
 
-  if (level >= speechThreshold) {
+  const speechDetected = shouldStartUtterance(level, speechThreshold, deltaMs);
+
+  if (speechDetected) {
     const startingNewUtterance = !state.currentTurn && !state.stoppingRecorder;
     state.lastVoiceAt = now;
-    if (
-      startingNewUtterance &&
-      hasAssistantVoiceOutput() &&
-      isLikelyBargeIn(level, speechThreshold)
-    ) {
-      interruptAssistantOutput('user_started_speaking');
+    if (startingNewUtterance) {
+      startUtteranceRecorder(speechThreshold);
     }
-    startUtteranceRecorder(speechThreshold);
   }
 
   if (state.currentTurn) {
@@ -782,7 +817,7 @@ function runVadLoop() {
     state.currentTurn.levelSum += level;
     state.currentTurn.maxLevel = Math.max(state.currentTurn.maxLevel, level);
 
-    if (level >= speechThreshold) {
+    if (speechDetected) {
       state.currentTurn.speechMs += deltaMs;
     }
   }
@@ -1015,6 +1050,8 @@ el.connect.addEventListener('click', () => {
       state.assistantAudioActive = true;
       state.assistantAudioTurnId = event.payload.turnId;
       state.lastAssistantTurnId = event.payload.turnId;
+      state.prerollChunks = [];
+      state.bargeInCandidateStartedAt = 0;
       setStatus('Preparing voice...');
     }
 
