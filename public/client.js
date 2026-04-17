@@ -43,9 +43,15 @@ const state = {
   interruptSentForTurnIds: new Set(),
   streamActive: false,
   audioPlaybackEnabled: true,
-  audioQueue: [],
-  audioElement: null,
-  audioObjectUrl: null,
+  playbackContext: null,
+  streamPlaybackNode: null,
+  streamPlaybackReady: null,
+  streamAudioPlaying: false,
+  streamAudioInputSampleRate: 24000,
+  audioSources: new Set(),
+  pendingAudioSchedules: 0,
+  audioScheduleChain: Promise.resolve(),
+  audioPlaybackNextTime: 0,
   audioPlaying: false,
   audioPlaybackToken: 0,
   pendingTurnEnd: false,
@@ -346,7 +352,9 @@ function hasAssistantVoiceOutput() {
   return (
     state.assistantAudioActive ||
     state.audioPlaying ||
-    state.audioQueue.length > 0
+    state.streamAudioPlaying ||
+    state.pendingAudioSchedules > 0 ||
+    state.audioSources.size > 0
   );
 }
 
@@ -384,10 +392,9 @@ function markAssistantAudioCancelled(turnId) {
     state.cancelledAudioTurnIds.add(activeTurnId);
   }
 
-  for (const queued of state.audioQueue) {
-    if (queued.turnId) {
-      state.cancelledAudioTurnIds.add(queued.turnId);
-    }
+  const assistantTurnId = getCurrentAssistantTurnId();
+  if (assistantTurnId) {
+    state.cancelledAudioTurnIds.add(assistantTurnId);
   }
 }
 
@@ -398,19 +405,23 @@ function stopAssistantAudio(options = {}) {
 
   const hadOutput = hasAssistantVoiceOutput();
   state.audioPlaybackToken += 1;
-  state.audioQueue = [];
+  state.pendingAudioSchedules = 0;
+  state.audioScheduleChain = Promise.resolve();
+  state.audioPlaybackNextTime = 0;
+  state.streamAudioPlaying = false;
 
-  if (state.audioElement) {
-    state.audioElement.pause();
-    state.audioElement.removeAttribute('src');
-    state.audioElement.load();
-    state.audioElement = null;
+  if (state.streamPlaybackNode) {
+    state.streamPlaybackNode.port.postMessage({ type: 'clear' });
   }
 
-  if (state.audioObjectUrl) {
-    URL.revokeObjectURL(state.audioObjectUrl);
-    state.audioObjectUrl = null;
+  for (const source of state.audioSources) {
+    try {
+      source.stop();
+    } catch {
+      // Source may already be stopped by the audio clock.
+    }
   }
+  state.audioSources.clear();
 
   state.audioPlaying = false;
   if (hadOutput) {
@@ -487,7 +498,7 @@ function resetAssistantOutputState(options = {}) {
   }
 }
 
-function audioBase64ToBlob(audioBase64, mimeType) {
+function audioBase64ToArrayBuffer(audioBase64) {
   const binary = atob(audioBase64);
   const bytes = new Uint8Array(binary.length);
 
@@ -495,7 +506,122 @@ function audioBase64ToBlob(audioBase64, mimeType) {
     bytes[index] = binary.charCodeAt(index);
   }
 
-  return new Blob([bytes], { type: mimeType });
+  return bytes.buffer;
+}
+
+async function ensurePlaybackContext() {
+  if (!state.playbackContext) {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    state.playbackContext = new AudioContextClass({
+      latencyHint: 'interactive',
+    });
+  }
+
+  if (state.playbackContext.state === 'suspended') {
+    await state.playbackContext.resume();
+  }
+
+  return state.playbackContext;
+}
+
+async function ensureStreamPlayback(sampleRate) {
+  const context = await ensurePlaybackContext();
+
+  if (!context.audioWorklet) {
+    throw new Error('AudioWorklet is not available in this browser.');
+  }
+
+  if (!state.streamPlaybackReady) {
+    state.streamPlaybackReady = context.audioWorklet.addModule(
+      '/audio-player.worklet.js',
+    );
+  }
+
+  await state.streamPlaybackReady;
+
+  if (!state.streamPlaybackNode) {
+    state.streamPlaybackNode = new AudioWorkletNode(
+      context,
+      'pcm-stream-player',
+      {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      },
+    );
+    state.streamPlaybackNode.port.onmessage = (message) => {
+      if (message.data?.type === 'drain') {
+        state.streamAudioPlaying = false;
+        state.audioPlaybackNextTime = 0;
+        state.prerollChunks = [];
+        state.bargeInCandidateStartedAt = 0;
+      }
+    };
+    state.streamPlaybackNode.connect(context.destination);
+  }
+
+  if (state.streamAudioInputSampleRate !== sampleRate) {
+    state.streamAudioInputSampleRate = sampleRate;
+    state.streamPlaybackNode.port.postMessage({
+      type: 'configure',
+      inputSampleRate: sampleRate,
+    });
+  }
+
+  return state.streamPlaybackNode;
+}
+
+function enqueueAssistantPcmAudio(payload) {
+  const sampleRate = Number(payload.sampleRate || 24000);
+  const audioBuffer = audioBase64ToArrayBuffer(payload.audioBase64);
+  const token = state.audioPlaybackToken;
+
+  state.pendingAudioSchedules += 1;
+  state.audioScheduleChain = state.audioScheduleChain
+    .then(async () => {
+      if (
+        token !== state.audioPlaybackToken ||
+        state.cancelledAudioTurnIds.has(payload.turnId)
+      ) {
+        return;
+      }
+
+      const node = await ensureStreamPlayback(sampleRate);
+
+      if (
+        token !== state.audioPlaybackToken ||
+        state.cancelledAudioTurnIds.has(payload.turnId)
+      ) {
+        return;
+      }
+
+      state.streamAudioPlaying = true;
+      node.port.postMessage(
+        {
+          type: 'chunk',
+          audio: audioBuffer,
+          inputSampleRate: sampleRate,
+          encoding: payload.encoding,
+        },
+        [audioBuffer],
+      );
+    })
+    .catch((error) => {
+      logClientEvent('client.audio.stream_failed', {
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Audio stream playback failed',
+      });
+    })
+    .finally(() => {
+      state.pendingAudioSchedules = Math.max(
+        0,
+        state.pendingAudioSchedules - 1,
+      );
+    });
+
+  return true;
 }
 
 function enqueueAssistantAudio(payload) {
@@ -513,67 +639,82 @@ function enqueueAssistantAudio(payload) {
     return false;
   }
 
-  state.audioQueue.push({
-    blob: audioBase64ToBlob(payload.audioBase64, payload.mimeType),
-    turnId: payload.turnId,
-  });
-  void playNextAssistantAudio();
+  if (payload.streaming && payload.encoding === 'pcm_s16le') {
+    return enqueueAssistantPcmAudio(payload);
+  }
+
+  const token = state.audioPlaybackToken;
+  const audioBuffer = audioBase64ToArrayBuffer(payload.audioBase64);
+  state.pendingAudioSchedules += 1;
+  state.audioScheduleChain = state.audioScheduleChain
+    .then(() => scheduleAssistantAudio(audioBuffer, payload.turnId, token))
+    .catch((error) => {
+      state.pendingAudioSchedules = Math.max(
+        0,
+        state.pendingAudioSchedules - 1,
+      );
+      logClientEvent('client.audio.playback_failed', {
+        message:
+          error instanceof Error ? error.message : 'Audio scheduling failed',
+      });
+    });
   return true;
 }
 
-async function playNextAssistantAudio() {
-  if (state.audioPlaying || state.audioQueue.length === 0) {
+async function scheduleAssistantAudio(encodedAudio, turnId, token) {
+  if (
+    token !== state.audioPlaybackToken ||
+    state.cancelledAudioTurnIds.has(turnId)
+  ) {
+    state.pendingAudioSchedules = Math.max(0, state.pendingAudioSchedules - 1);
     return;
   }
 
-  const next = state.audioQueue.shift();
-  if (state.cancelledAudioTurnIds.has(next.turnId)) {
-    void playNextAssistantAudio();
+  const context = await ensurePlaybackContext();
+  const decodedAudio = await context.decodeAudioData(encodedAudio.slice(0));
+
+  if (
+    token !== state.audioPlaybackToken ||
+    state.cancelledAudioTurnIds.has(turnId)
+  ) {
+    state.pendingAudioSchedules = Math.max(0, state.pendingAudioSchedules - 1);
     return;
   }
 
+  const source = context.createBufferSource();
+  source.buffer = decodedAudio;
+  source.connect(context.destination);
+
+  const startAt = Math.max(
+    context.currentTime + 0.04,
+    state.audioPlaybackNextTime || 0,
+  );
+  state.audioPlaybackNextTime = startAt + decodedAudio.duration;
   state.audioPlaying = true;
-  const token = state.audioPlaybackToken;
+  state.audioSources.add(source);
+  state.pendingAudioSchedules = Math.max(0, state.pendingAudioSchedules - 1);
 
-  if (state.audioObjectUrl) {
-    URL.revokeObjectURL(state.audioObjectUrl);
-  }
-
-  const objectUrl = URL.createObjectURL(next.blob);
-  state.audioObjectUrl = objectUrl;
-  const audio = new Audio(objectUrl);
-  state.audioElement = audio;
-
-  try {
-    await audio.play();
-    await new Promise((resolve) => {
-      audio.addEventListener('ended', resolve, { once: true });
-      audio.addEventListener('error', resolve, { once: true });
-      audio.addEventListener('pause', resolve, { once: true });
-    });
-  } catch (error) {
-    logClientEvent('client.audio.playback_failed', {
-      message: error instanceof Error ? error.message : 'Audio playback failed',
-    });
-  } finally {
-    if (state.audioElement === audio) {
-      state.audioElement = null;
-    }
-    if (state.audioObjectUrl === objectUrl) {
-      URL.revokeObjectURL(objectUrl);
-      state.audioObjectUrl = null;
-    } else {
-      URL.revokeObjectURL(objectUrl);
-    }
+  source.onended = () => {
+    state.audioSources.delete(source);
 
     if (token !== state.audioPlaybackToken) {
       return;
     }
 
-    state.audioPlaying = false;
-    state.prerollChunks = [];
-    state.bargeInCandidateStartedAt = 0;
-    void playNextAssistantAudio();
+    if (state.audioSources.size === 0 && state.pendingAudioSchedules === 0) {
+      state.audioPlaying = false;
+      state.audioPlaybackNextTime = 0;
+      state.prerollChunks = [];
+      state.bargeInCandidateStartedAt = 0;
+    }
+  };
+
+  try {
+    source.start(startAt);
+  } catch (error) {
+    state.audioSources.delete(source);
+    state.audioPlaying = state.audioSources.size > 0;
+    throw error;
   }
 }
 
@@ -658,11 +799,17 @@ function startUtteranceRecorder(thresholdAtStart) {
 
   const now = performance.now();
   state.currentTurn = createTurn(now, thresholdAtStart);
+  const shouldInterruptAssistant =
+    state.currentTurn.startedDuringAssistantOutput;
   state.pendingTurnEnd = false;
   state.stoppingRecorder = false;
   state.recordingStartedAt = now;
   state.lastVoiceAt = state.recordingStartedAt;
   state.latestPartialTranscript = '';
+
+  if (shouldInterruptAssistant) {
+    interruptAssistantOutput('barge_in_started');
+  }
 
   send({
     type: 'audio.turn_start',

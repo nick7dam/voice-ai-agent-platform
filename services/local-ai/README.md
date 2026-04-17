@@ -73,6 +73,7 @@ LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
 LOCAL_TTS_DEVICE=auto \
 LOCAL_TTS_PRELOAD=true \
+LOCAL_TTS_SAMPLE_RATE=24000 \
 .venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
@@ -105,6 +106,7 @@ Run local TTS on CUDA:
 ```bash
 LOCAL_TTS_DEVICE=cuda \
 LOCAL_TTS_PRELOAD=true \
+LOCAL_TTS_SAMPLE_RATE=24000 \
 .venv-tts/bin/python services/local-ai/tts_server.py
 ```
 
@@ -117,4 +119,6 @@ again after startup.
 
 The TTS service preloads and warms Kokoro by default. Use `/health` to confirm
 `effectiveDevice` and `torchCudaAvailable`, and `/warmup` if you want to warm it
-again after startup.
+again after startup. It exposes `/synthesize` for WAV responses and
+`/synthesize/stream` for raw `pcm_s16le` chunks used by the browser
+AudioWorklet player.

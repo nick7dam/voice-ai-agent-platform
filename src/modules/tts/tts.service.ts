@@ -5,6 +5,8 @@ import {
 } from '../../common/constants/injection-tokens';
 import {
   TtsAudioResult,
+  TtsAudioStreamChunk,
+  TtsAudioStreamResult,
   TtsSegment,
   TtsSynthesisInput,
 } from '../../common/types/tts.types';
@@ -39,6 +41,14 @@ export class TtsService {
 
   shouldEmitEarlyAudio(): boolean {
     return this.config.tts.playbackMode !== 'full';
+  }
+
+  shouldStreamPhrases(): boolean {
+    return this.config.tts.playbackMode === 'streaming_phrases';
+  }
+
+  canStreamAudio(): boolean {
+    return typeof this.adapter.stream === 'function';
   }
 
   splitText(text: string): TtsSegment[] {
@@ -79,7 +89,10 @@ export class TtsService {
   }
 
   private selectTextForSpeech(text: string, maxChars: number): string {
-    if (this.config.tts.playbackMode === 'full') {
+    if (
+      this.config.tts.playbackMode === 'full' ||
+      this.config.tts.playbackMode === 'streaming_phrases'
+    ) {
       return text;
     }
 
@@ -132,6 +145,25 @@ export class TtsService {
     }
 
     return result;
+  }
+
+  async streamSegment(
+    segment: TtsSegment,
+    callbacks: {
+      onChunk: (chunk: TtsAudioStreamChunk) => void | Promise<void>;
+    },
+  ): Promise<TtsAudioStreamResult> {
+    if (!this.adapter.stream) {
+      throw new Error('The configured TTS adapter does not support streaming.');
+    }
+
+    const input: TtsSynthesisInput = {
+      text: segment.text,
+      segmentIndex: segment.index,
+      segmentTotal: segment.total,
+    };
+
+    return this.adapter.stream(input, callbacks);
   }
 
   private cacheKey(text: string): string {

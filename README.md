@@ -78,12 +78,14 @@ OLLAMA_THINK=false
 
 TTS_PROVIDER=local_kokoro
 TTS_ENABLED=true
+TTS_PLAYBACK_MODE=streaming_phrases
 TTS_CONCURRENCY=1
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M
 LOCAL_TTS_VOICE=af_heart
 LOCAL_TTS_BASE_URL=http://localhost:8002
 LOCAL_TTS_DEVICE=auto
 LOCAL_TTS_PRELOAD=true
+LOCAL_TTS_SAMPLE_RATE=24000
 ```
 
 Recommended model names:
@@ -134,6 +136,7 @@ LOCAL_TTS_MODEL=hexgrad/Kokoro-82M \
 LOCAL_TTS_VOICE=af_heart \
 LOCAL_TTS_DEVICE=auto \
 LOCAL_TTS_PRELOAD=true \
+LOCAL_TTS_SAMPLE_RATE=24000 \
 pnpm local:tts
 ```
 
@@ -156,6 +159,7 @@ Run local TTS with CUDA:
 ```bash
 LOCAL_TTS_DEVICE=cuda \
 LOCAL_TTS_PRELOAD=true \
+LOCAL_TTS_SAMPLE_RATE=24000 \
 pnpm local:tts
 ```
 
@@ -182,8 +186,8 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 `MIN_STT_AUDIO_BYTES` is a backend guard: turns smaller than this are discarded before STT.
 `LOCAL_STT_PRELOAD=true` and `LOCAL_STT_WARMUP=true` load and exercise Whisper when the service starts, so GPU/library problems fail fast instead of during the first user turn.
 The browser sends throttled `audio.partial` snapshots while speech is active. The backend emits `transcript.partial` for live feedback, then waits for `audio.turn_end` before sending the final transcript to reasoning.
-`TTS_ENABLED` controls optional speech playback. Text is still emitted first as `assistant.response`.
-`TTS_PLAYBACK_MODE=first_sentence` keeps voice latency low by speaking only the first sentence. Use `first_segment` for the first 200-character chunk or `full` to synthesize the full response.
+`TTS_ENABLED` controls optional speech playback. Text is still emitted as plain `assistant.response`; with streaming phrase playback, audio chunks may arrive before the final text event.
+`TTS_PLAYBACK_MODE=streaming_phrases` speaks short phrases from the LLM stream for the most natural local demo. With local Kokoro, the backend uses `/synthesize/stream` and sends raw `pcm_s16le` chunks to the browser `AudioWorklet` player. Use `first_sentence` or `first_segment` to speak less, or `full` to wait and synthesize the full response.
 `TTS_CONCURRENCY=1` is recommended for local Kokoro so multiple audio chunks do not fight for the same GPU.
 
 ## Run
@@ -311,7 +315,7 @@ session.interrupted optional
 tool.called       optional
 tool.result       optional
 assistant.audio.started optional, may arrive before assistant.response
-assistant.audio.chunk   optional, may arrive before assistant.response
+assistant.audio.chunk   optional, may arrive before assistant.response; local Kokoro uses streaming pcm_s16le chunks
 assistant.response
 assistant.audio.ended   optional
 ```
@@ -422,7 +426,8 @@ Current implementation:
 - TTS lives in `src/modules/tts/`.
 - It is disabled unless `TTS_ENABLED=true`.
 - Kokoro is the default local TTS provider. Groq Orpheus remains available through `TTS_PROVIDER=groq`.
-- Responses are split into short segments and played in order by the browser.
+- Local Kokoro exposes both `/synthesize` for full WAV synthesis and `/synthesize/stream` for raw PCM streaming.
+- Responses are split into short segments and played in order by the browser. Streaming local chunks are played by `public/audio-player.worklet.js`.
 - The browser can toggle audio playback with the `Audio on/off` button. This also disables backend TTS synthesis for the session to avoid unnecessary spend.
 - TTS logs estimated character cost as `tts.cost ... estimatedUsd=...` and cache hits as `tts.cache.hit ...`. Local Kokoro estimates cost as zero.
 

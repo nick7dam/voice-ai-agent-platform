@@ -87,7 +87,29 @@ export class OrchestratorService {
 
       this.logger.log(`reasoning.start session=${sessionId} turn=${turnId}`);
       let earlyAudioStarted = false;
+      let speechCursor = 0;
+      let queuedSpeech = Promise.resolve();
       let streamedText = '';
+      const queueEarlySpeech = (text: string) => {
+        const speech = text.replace(/\s+/g, ' ').trim();
+
+        if (!speech) {
+          return;
+        }
+
+        earlyAudioStarted = true;
+        this.logger.log(
+          `tts.early.start session=${sessionId} turn=${turnId} chars=${speech.length}`,
+        );
+        queuedSpeech = queuedSpeech
+          .then(() => this.emitAssistantAudio(sessionId, turnId, speech, emit))
+          .catch((error: unknown) => {
+            const payload = toErrorPayload(error);
+            this.logger.warn(
+              `tts.early.error session=${sessionId} turn=${turnId} code=${payload.code} message=${payload.message}`,
+            );
+          });
+      };
       const shouldUseTools = this.shouldUseTools(trimmedTranscript);
       const initial = shouldUseTools
         ? await this.reasoning.generate({
@@ -105,7 +127,6 @@ export class OrchestratorService {
                 streamedText += delta;
 
                 if (
-                  earlyAudioStarted ||
                   !this.tts.isEnabled() ||
                   !this.tts.shouldEmitEarlyAudio() ||
                   !this.sessions.isAudioOutputEnabled(sessionId)
@@ -113,21 +134,34 @@ export class OrchestratorService {
                   return;
                 }
 
-                const earlyText = this.extractEarlySpeech(streamedText);
-                if (!earlyText) {
+                if (this.tts.shouldStreamPhrases()) {
+                  const chunks = this.extractSpeechChunks(
+                    streamedText,
+                    speechCursor,
+                    false,
+                  );
+
+                  for (const chunk of chunks) {
+                    speechCursor = chunk.endIndex;
+                    queueEarlySpeech(chunk.text);
+                  }
+
                   return;
                 }
 
-                earlyAudioStarted = true;
-                this.logger.log(
-                  `tts.early.start session=${sessionId} turn=${turnId} chars=${earlyText.length}`,
+                if (earlyAudioStarted) {
+                  return;
+                }
+
+                const [earlyChunk] = this.extractSpeechChunks(
+                  streamedText,
+                  speechCursor,
+                  false,
                 );
-                void this.emitAssistantAudio(
-                  sessionId,
-                  turnId,
-                  earlyText,
-                  emit,
-                );
+                if (earlyChunk) {
+                  speechCursor = earlyChunk.endIndex;
+                  queueEarlySpeech(earlyChunk.text);
+                }
               },
             },
           );
@@ -189,7 +223,13 @@ export class OrchestratorService {
         },
       });
 
-      if (!earlyAudioStarted) {
+      if (earlyAudioStarted && this.tts.shouldStreamPhrases()) {
+        const chunks = this.extractSpeechChunks(safeText, speechCursor, true);
+        for (const chunk of chunks) {
+          speechCursor = chunk.endIndex;
+          queueEarlySpeech(chunk.text);
+        }
+      } else if (!earlyAudioStarted) {
         void this.emitAssistantAudio(sessionId, turnId, safeText, emit);
       }
 
@@ -294,25 +334,73 @@ export class OrchestratorService {
     );
   }
 
-  private extractEarlySpeech(text: string): string | undefined {
-    const normalized = text.replace(/\s+/g, ' ').trim();
+  private extractSpeechChunks(
+    text: string,
+    cursor: number,
+    force: boolean,
+  ): Array<{ text: string; endIndex: number }> {
+    const chunks: Array<{ text: string; endIndex: number }> = [];
+    const flushRemainder = force;
+    let offset = cursor;
 
-    if (normalized.length < 24) {
+    while (offset < text.length) {
+      const remaining = text.slice(offset);
+      const boundary = this.findSpeechBoundary(remaining, force);
+
+      if (!boundary) {
+        break;
+      }
+
+      const chunk = remaining.slice(0, boundary).replace(/\s+/g, ' ').trim();
+      offset += boundary;
+
+      if (chunk.length >= 2) {
+        chunks.push({ text: chunk, endIndex: offset });
+      }
+
+      force = flushRemainder;
+    }
+
+    return chunks;
+  }
+
+  private findSpeechBoundary(text: string, force: boolean): number | undefined {
+    const minSentenceChars = 24;
+    const preferredChars = 90;
+    const maxChars = 140;
+
+    for (const match of text.matchAll(/[.!?](?=\s|$)/g)) {
+      const end = (match.index ?? 0) + 1;
+      if (end >= minSentenceChars) {
+        return end;
+      }
+    }
+
+    if (text.length >= preferredChars) {
+      const softBoundary = Math.max(
+        text.lastIndexOf(',', maxChars),
+        text.lastIndexOf(';', maxChars),
+        text.lastIndexOf(':', maxChars),
+      );
+
+      if (softBoundary >= 50) {
+        return softBoundary + 1;
+      }
+
+      const lastSpace = text.lastIndexOf(' ', maxChars);
+      if (lastSpace >= 50) {
+        return lastSpace;
+      }
+
+      return Math.min(text.length, maxChars);
+    }
+
+    if (!force) {
       return undefined;
     }
 
-    const firstSentence = normalized.match(/^.{24,}?[.!?](?=\s|$)/)?.[0];
-    if (firstSentence) {
-      return firstSentence.slice(0, 200);
-    }
-
-    if (normalized.length < 100) {
-      return undefined;
-    }
-
-    const fallback = normalized.slice(0, 100);
-    const lastSpace = fallback.lastIndexOf(' ');
-    return `${fallback.slice(0, lastSpace > 50 ? lastSpace : 100).trim()}.`;
+    const trimmed = text.trimEnd();
+    return trimmed.length > 0 ? trimmed.length : undefined;
   }
 
   private async emitAssistantAudio(
@@ -346,48 +434,17 @@ export class OrchestratorService {
         turnId,
         model: metadata.model,
         voice: metadata.voice,
-        format: metadata.format,
+        format: this.tts.canStreamAudio() ? 'pcm_s16le' : metadata.format,
         segmentCount: segments.length,
+        streaming: this.tts.canStreamAudio(),
       },
     });
 
     try {
-      for (const batch of this.batchSegments(segments)) {
-        const pendingAudio = batch.map((segment) =>
-          this.tts.synthesizeSegment(segment),
-        );
-
-        for (const promise of pendingAudio) {
-          if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
-            this.logger.log(
-              `tts.skip_stale session=${sessionId} turn=${turnId}`,
-            );
-            return;
-          }
-
-          const audio = await promise;
-
-          if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
-            this.logger.log(
-              `tts.chunk.skip_stale session=${sessionId} turn=${turnId}`,
-            );
-            return;
-          }
-
-          emit({
-            type: 'assistant.audio.chunk',
-            sessionId,
-            timestamp: nowIso(),
-            payload: {
-              turnId,
-              index: audio.segmentIndex,
-              total: audio.segmentTotal,
-              audioBase64: audio.audio.toString('base64'),
-              mimeType: audio.mimeType,
-              latencyMs: audio.latencyMs,
-            },
-          });
-        }
+      if (this.tts.canStreamAudio()) {
+        await this.emitAssistantAudioStream(sessionId, turnId, segments, emit);
+      } else {
+        await this.emitAssistantAudioBuffers(sessionId, turnId, segments, emit);
       }
 
       if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
@@ -414,6 +471,94 @@ export class OrchestratorService {
       this.logger.warn(
         `tts.error session=${sessionId} turn=${turnId} code=${payload.code} message=${payload.message} details=${JSON.stringify(payload.details ?? {})}`,
       );
+    }
+  }
+
+  private async emitAssistantAudioStream(
+    sessionId: string,
+    turnId: string,
+    segments: ReturnType<TtsService['splitText']>,
+    emit: OrchestratorEmit,
+  ): Promise<void> {
+    for (const segment of segments) {
+      if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+        this.logger.log(
+          `tts.stream.skip_stale session=${sessionId} turn=${turnId}`,
+        );
+        return;
+      }
+
+      await this.tts.streamSegment(segment, {
+        onChunk: (chunk) => {
+          if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+            this.logger.log(
+              `tts.stream.chunk.skip_stale session=${sessionId} turn=${turnId}`,
+            );
+            return;
+          }
+
+          emit({
+            type: 'assistant.audio.chunk',
+            sessionId,
+            timestamp: nowIso(),
+            payload: {
+              turnId,
+              index: chunk.segmentIndex,
+              total: chunk.segmentTotal,
+              audioBase64: chunk.audio.toString('base64'),
+              mimeType: chunk.mimeType,
+              latencyMs: chunk.latencyMs,
+              streaming: true,
+              sampleRate: chunk.sampleRate,
+              encoding: chunk.encoding,
+              chunkIndex: chunk.chunkIndex,
+            },
+          });
+        },
+      });
+    }
+  }
+
+  private async emitAssistantAudioBuffers(
+    sessionId: string,
+    turnId: string,
+    segments: ReturnType<TtsService['splitText']>,
+    emit: OrchestratorEmit,
+  ): Promise<void> {
+    for (const batch of this.batchSegments(segments)) {
+      const pendingAudio = batch.map((segment) =>
+        this.tts.synthesizeSegment(segment),
+      );
+
+      for (const promise of pendingAudio) {
+        if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+          this.logger.log(`tts.skip_stale session=${sessionId} turn=${turnId}`);
+          return;
+        }
+
+        const audio = await promise;
+
+        if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+          this.logger.log(
+            `tts.chunk.skip_stale session=${sessionId} turn=${turnId}`,
+          );
+          return;
+        }
+
+        emit({
+          type: 'assistant.audio.chunk',
+          sessionId,
+          timestamp: nowIso(),
+          payload: {
+            turnId,
+            index: audio.segmentIndex,
+            total: audio.segmentTotal,
+            audioBase64: audio.audio.toString('base64'),
+            mimeType: audio.mimeType,
+            latencyMs: audio.latencyMs,
+          },
+        });
+      }
     }
   }
 

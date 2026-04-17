@@ -20,3 +20,28 @@ export interface TtsAudioResult {
   segmentIndex: number;
   segmentTotal: number;
 }
+
+export interface TtsAudioStreamChunk {
+  audio: Buffer;
+  mimeType: string;
+  encoding: 'pcm_s16le';
+  sampleRate: number;
+  model: string;
+  voice: string;
+  format: string;
+  latencyMs: number;
+  chunkIndex: number;
+  segmentIndex: number;
+  segmentTotal: number;
+}
+
+export interface TtsAudioStreamResult {
+  model: string;
+  voice: string;
+  format: string;
+  latencyMs: number;
+  chunkCount: number;
+  byteLength: number;
+  segmentIndex: number;
+  segmentTotal: number;
+}

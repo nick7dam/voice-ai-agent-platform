@@ -127,6 +127,9 @@ export type ServerEvent =
         voice: string;
         format: string;
         segmentCount: number;
+        streaming?: boolean;
+        sampleRate?: number;
+        encoding?: string;
       }
     >
   | BaseServerEvent<
@@ -138,6 +141,10 @@ export type ServerEvent =
         audioBase64: string;
         mimeType: string;
         latencyMs: number;
+        streaming?: boolean;
+        sampleRate?: number;
+        encoding?: string;
+        chunkIndex?: number;
       }
     >
   | BaseServerEvent<

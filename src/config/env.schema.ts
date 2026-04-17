@@ -35,8 +35,8 @@ export const envSchema = z.object({
   GROQ_TTS_MAX_CHARS: z.coerce.number().int().positive().max(200).default(120),
   GROQ_TTS_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   TTS_PLAYBACK_MODE: z
-    .enum(['first_sentence', 'first_segment', 'full'])
-    .default('first_sentence'),
+    .enum(['first_sentence', 'first_segment', 'full', 'streaming_phrases'])
+    .default('streaming_phrases'),
   TTS_CONCURRENCY: z.coerce.number().int().positive().max(5).default(1),
   TTS_CACHE_ENABLED: booleanFromEnv.default(true),
   TTS_ESTIMATED_PRICE_PER_MILLION_CHARS: z.coerce

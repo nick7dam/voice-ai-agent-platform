@@ -8,6 +8,7 @@ import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from kokoro import KPipeline
 from pydantic import BaseModel, Field
 
@@ -80,20 +81,23 @@ def resolve_device() -> str:
     return REQUESTED_DEVICE
 
 
+def iter_audio_parts(pipeline: KPipeline, text: str, voice: str, speed: float):
+    with torch.inference_mode():
+        generator = pipeline(text, voice=voice, speed=speed)
+
+        for _, _, audio in generator:
+            if hasattr(audio, "detach"):
+                audio = audio.detach().cpu().numpy()
+            yield np.asarray(audio, dtype=np.float32)
+
+
 def generate_audio(text: str, voice: str, lang_code: str, speed: float):
     load_started_at = time.perf_counter()
     pipeline = get_pipeline(lang_code)
     load_latency_ms = elapsed_ms(load_started_at)
 
     synth_started_at = time.perf_counter()
-    with torch.inference_mode():
-        generator = pipeline(text, voice=voice, speed=speed)
-        audio_parts = []
-
-        for _, _, audio in generator:
-            if hasattr(audio, "detach"):
-                audio = audio.detach().cpu().numpy()
-            audio_parts.append(np.asarray(audio, dtype=np.float32))
+    audio_parts = list(iter_audio_parts(pipeline, text, voice, speed))
 
     synth_latency_ms = elapsed_ms(synth_started_at)
 
@@ -107,6 +111,15 @@ def generate_audio(text: str, voice: str, lang_code: str, speed: float):
     )
 
     return audio, load_latency_ms, synth_latency_ms
+
+
+def audio_to_pcm16_bytes(audio: np.ndarray) -> bytes:
+    if audio.size == 0:
+        return b""
+
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm = (clipped * 32767.0).astype("<i2", copy=False)
+    return pcm.tobytes()
 
 
 def warmup():
@@ -223,6 +236,87 @@ def synthesize(request: SynthesizeRequest):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/synthesize/stream")
+def synthesize_stream(request: SynthesizeRequest):
+    started_at = time.perf_counter()
+    text = request.text.strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    voice = request.voice or DEFAULT_VOICE
+    lang_code = request.langCode or DEFAULT_LANG_CODE
+    speed = request.speed or DEFAULT_SPEED
+
+    try:
+        load_started_at = time.perf_counter()
+        pipeline = get_pipeline(lang_code)
+        load_latency_ms = elapsed_ms(load_started_at)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    def stream_pcm():
+        first_chunk_latency_ms = None
+        synth_started_at = time.perf_counter()
+        chunk_count = 0
+        audio_samples = 0
+
+        try:
+            for audio in iter_audio_parts(pipeline, text, voice, speed):
+                pcm = audio_to_pcm16_bytes(audio)
+                if not pcm:
+                    continue
+
+                if first_chunk_latency_ms is None:
+                    first_chunk_latency_ms = elapsed_ms(started_at)
+
+                chunk_count += 1
+                audio_samples += len(audio)
+                yield pcm
+        except Exception:
+            logger.exception(
+                "tts.stream.error device=%s voice=%s chars=%d chunks=%d",
+                resolve_device(),
+                voice,
+                len(text),
+                chunk_count,
+            )
+            raise
+        finally:
+            synth_latency_ms = elapsed_ms(synth_started_at)
+            latency_ms = elapsed_ms(started_at)
+            logger.info(
+                "tts.stream.end device=%s voice=%s chars=%d chunks=%d audioSeconds=%.2f loadLatencyMs=%d firstChunkLatencyMs=%s synthLatencyMs=%d latencyMs=%d",
+                resolve_device(),
+                voice,
+                len(text),
+                chunk_count,
+                audio_samples / SAMPLE_RATE,
+                load_latency_ms,
+                (
+                    str(first_chunk_latency_ms)
+                    if first_chunk_latency_ms is not None
+                    else "none"
+                ),
+                synth_latency_ms,
+                latency_ms,
+            )
+
+    return StreamingResponse(
+        stream_pcm(),
+        media_type="audio/pcm",
+        headers={
+            "X-Model": MODEL_NAME,
+            "X-Voice": voice,
+            "X-Device": resolve_device(),
+            "X-Text-Chars": str(len(text)),
+            "X-Sample-Rate": str(SAMPLE_RATE),
+            "X-Audio-Encoding": "pcm_s16le",
+            "X-Load-Latency-Ms": str(load_latency_ms),
+        },
+    )
 
 
 if __name__ == "__main__":

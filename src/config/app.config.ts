@@ -36,7 +36,11 @@ export interface AppConfig {
     responseFormat: 'wav';
     maxChars: number;
     timeoutMs: number;
-    playbackMode: 'first_sentence' | 'first_segment' | 'full';
+    playbackMode:
+      | 'first_sentence'
+      | 'first_segment'
+      | 'full'
+      | 'streaming_phrases';
     concurrency: number;
     cacheEnabled: boolean;
     estimatedPricePerMillionChars: number;
