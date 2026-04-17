@@ -107,6 +107,7 @@ export class LocalKokoroAdapter implements TtsAdapter {
     const startedAt = process.hrtime.bigint();
     let chunkIndex = 0;
     let byteLength = 0;
+    let carry = Buffer.alloc(0);
 
     try {
       const response = await requestBufferStream(
@@ -125,11 +126,26 @@ export class LocalKokoroAdapter implements TtsAdapter {
           timeoutMs: this.config.tts.timeoutMs,
           shouldStreamResponse: (status) => status >= 200 && status < 300,
           onChunk: (audio, streamResponse) => {
+            const alignedAudio =
+              carry.byteLength > 0 ? Buffer.concat([carry, audio]) : audio;
+            const usableLength =
+              alignedAudio.byteLength - (alignedAudio.byteLength % 2);
+
+            carry =
+              usableLength === alignedAudio.byteLength
+                ? Buffer.alloc(0)
+                : Buffer.from(alignedAudio.subarray(usableLength));
+
+            if (usableLength === 0) {
+              return;
+            }
+
+            const pcmAudio = alignedAudio.subarray(0, usableLength);
             chunkIndex += 1;
-            byteLength += audio.byteLength;
+            byteLength += pcmAudio.byteLength;
 
             return callbacks.onChunk({
-              audio,
+              audio: pcmAudio,
               mimeType: 'audio/pcm',
               encoding: 'pcm_s16le',
               sampleRate: this.numberHeader(
@@ -147,6 +163,12 @@ export class LocalKokoroAdapter implements TtsAdapter {
           },
         },
       );
+
+      if (carry.byteLength > 0) {
+        this.logger.warn(
+          `tts.local.stream.trailing_byte model=${this.config.tts.model} voice=${this.config.tts.voice} segment=${input.segmentIndex + 1}/${input.segmentTotal}`,
+        );
+      }
 
       if (response.status < 200 || response.status >= 300) {
         throw new AppError(

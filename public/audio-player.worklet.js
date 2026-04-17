@@ -6,6 +6,7 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
     this.bufferedFrames = 0;
     this.inputSampleRate = 24000;
     this.wasPlaying = false;
+    this.leftoverByte = null;
 
     this.port.onmessage = (message) => {
       const data = message.data || {};
@@ -23,6 +24,7 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
         this.readIndex = 0;
         this.bufferedFrames = 0;
         this.wasPlaying = false;
+        this.leftoverByte = null;
         return;
       }
 
@@ -51,35 +53,57 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
   }
 
   decodePcm16(buffer, inputRate) {
-    if (!buffer || buffer.byteLength < 2) {
+    if (!buffer || buffer.byteLength === 0) {
       return new Float32Array(0);
     }
 
-    const usableBytes = buffer.byteLength - (buffer.byteLength % 2);
-    const pcm = new Int16Array(buffer.slice(0, usableBytes));
+    let bytes = new Uint8Array(buffer);
+
+    if (this.leftoverByte !== null) {
+      const combined = new Uint8Array(bytes.length + 1);
+      combined[0] = this.leftoverByte;
+      combined.set(bytes, 1);
+      bytes = combined;
+      this.leftoverByte = null;
+    }
+
+    const usableBytes = bytes.byteLength - (bytes.byteLength % 2);
+    if (usableBytes !== bytes.byteLength) {
+      this.leftoverByte = bytes[bytes.byteLength - 1];
+    }
+
+    if (usableBytes < 2) {
+      return new Float32Array(0);
+    }
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, usableBytes);
+    const inputFrames = new Float32Array(usableBytes / 2);
+    for (let index = 0; index < inputFrames.length; index += 1) {
+      inputFrames[index] = Math.max(
+        -1,
+        Math.min(1, view.getInt16(index * 2, true) / 32768),
+      );
+    }
+
     const outputRate = sampleRate;
 
     if (inputRate === outputRate) {
-      const frames = new Float32Array(pcm.length);
-      for (let index = 0; index < pcm.length; index += 1) {
-        frames[index] = Math.max(-1, Math.min(1, pcm[index] / 32768));
-      }
-      return frames;
+      return inputFrames;
     }
 
     const outputLength = Math.max(
       1,
-      Math.round((pcm.length * outputRate) / inputRate),
+      Math.round((inputFrames.length * outputRate) / inputRate),
     );
     const frames = new Float32Array(outputLength);
 
     for (let index = 0; index < outputLength; index += 1) {
       const sourceIndex = (index * inputRate) / outputRate;
       const left = Math.floor(sourceIndex);
-      const right = Math.min(left + 1, pcm.length - 1);
+      const right = Math.min(left + 1, inputFrames.length - 1);
       const fraction = sourceIndex - left;
       const sample =
-        (pcm[left] * (1 - fraction) + pcm[right] * fraction) / 32768;
+        inputFrames[left] * (1 - fraction) + inputFrames[right] * fraction;
       frames[index] = Math.max(-1, Math.min(1, sample));
     }
 
