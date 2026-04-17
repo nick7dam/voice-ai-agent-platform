@@ -15,7 +15,7 @@
     "client": "ts-node scripts/local-client.ts",
     "check:ollama": "ts-node scripts/check-ollama.ts",
     "local:stt": ".venv-stt/bin/python services/local-ai/stt_server.py",
-    "local:stt:cuda": "LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LD_LIBRARY_PATH=$(./.venv-stt/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-stt/bin/python services/local-ai/stt_server.py",
+    "local:stt:cuda": "LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_STT_LANGUAGE=en LOCAL_STT_VAD_FILTER=false LD_LIBRARY_PATH=$(./.venv-stt/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-stt/bin/python services/local-ai/stt_server.py",
     "local:tts": ".venv-tts/bin/python services/local-ai/tts_server.py",
     "local:tts:cuda": "LOCAL_TTS_DEVICE=cuda LOCAL_TTS_PRELOAD=true .venv-tts/bin/python services/local-ai/tts_server.py",
     "lint": "eslint \"{src,apps,libs,test,scripts}/**/*.ts\" --fix",

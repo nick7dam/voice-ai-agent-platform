@@ -65,8 +65,11 @@ The default `.env.example` is configured for a fully local model stack:
 STT_PROVIDER=local_whisper
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
 LOCAL_STT_BASE_URL=http://localhost:8001
+LOCAL_STT_LANGUAGE=en
+LOCAL_STT_VAD_FILTER=false
 LOCAL_STT_PRELOAD=true
 LOCAL_STT_WARMUP=true
+PARTIAL_STT_ENABLED=false
 
 REASONING_PROVIDER=ollama
 OLLAMA_MODEL=llama3.2:3b
@@ -126,6 +129,8 @@ Run local STT:
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3 \
 LOCAL_STT_DEVICE=cpu \
 LOCAL_STT_COMPUTE_TYPE=int8 \
+LOCAL_STT_LANGUAGE=en \
+LOCAL_STT_VAD_FILTER=false \
 pnpm local:stt
 ```
 
@@ -184,8 +189,11 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 `OLLAMA_KEEP_ALIVE` keeps the model loaded after a request so the next turn avoids a cold start.
 `OLLAMA_THINK=false` disables supported model thinking output/effort, which is useful for low-latency voice turns.
 `MIN_STT_AUDIO_BYTES` is a backend guard: turns smaller than this are discarded before STT.
+`LOCAL_STT_LANGUAGE=en` skips Whisper language detection for faster English transcription. Set it to an empty value only if you need automatic language detection.
+`LOCAL_STT_VAD_FILTER=false` is fastest because the browser VAD already gates turns before STT.
 `LOCAL_STT_PRELOAD=true` and `LOCAL_STT_WARMUP=true` load and exercise Whisper when the service starts, so GPU/library problems fail fast instead of during the first user turn.
-The browser sends throttled `audio.partial` snapshots while speech is active. The backend emits `transcript.partial` for live feedback, then waits for `audio.turn_end` before sending the final transcript to reasoning.
+`PARTIAL_STT_ENABLED=false` avoids extra partial Whisper calls while the user is still speaking. Turn it on only when you want live partial transcript text and can afford the extra GPU work.
+The browser sends throttled `audio.partial` snapshots while speech is active. If `PARTIAL_STT_ENABLED=true`, the backend emits `transcript.partial` for live feedback, then waits for `audio.turn_end` before sending the final transcript to reasoning.
 `TTS_ENABLED` controls optional speech playback. Text is still emitted as plain `assistant.response`; with streaming phrase playback, audio chunks may arrive before the final text event.
 `TTS_PLAYBACK_MODE=streaming_phrases` speaks short phrases from the LLM stream for the most natural local demo. With local Kokoro, the backend uses `/synthesize/stream` and sends raw `pcm_s16le` chunks to the browser `AudioWorklet` player. Use `first_sentence` or `first_segment` to speak less, or `full` to wait and synthesize the full response.
 `TTS_CONCURRENCY=1` is recommended for local Kokoro so multiple audio chunks do not fight for the same GPU.

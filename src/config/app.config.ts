@@ -14,6 +14,7 @@ export interface AppConfig {
     localBaseUrl: string;
     localModel: string;
     localTimeoutMs: number;
+    partialEnabled: boolean;
     configured: boolean;
   };
   reasoning: {
@@ -77,6 +78,7 @@ export function loadAppConfig(): AppConfig {
       localBaseUrl: env.LOCAL_STT_BASE_URL.replace(/\/$/, ''),
       localModel: env.LOCAL_STT_MODEL,
       localTimeoutMs: env.LOCAL_STT_TIMEOUT_MS,
+      partialEnabled: env.PARTIAL_STT_ENABLED,
       configured:
         env.STT_PROVIDER === 'groq'
           ? env.GROQ_API_KEY.trim().length > 0

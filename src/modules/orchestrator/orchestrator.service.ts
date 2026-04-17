@@ -11,7 +11,7 @@ import { ToolRegistryService } from '../tools/tool-registry.service';
 import { ToolRuntimeService } from '../tools/tool-runtime.service';
 import { TtsService } from '../tts/tts.service';
 import { PromptBuilderService } from './prompt-builder.service';
-import { toErrorPayload } from '../../common/types/errors';
+import { AppError, toErrorPayload } from '../../common/types/errors';
 
 export type OrchestratorEmit = (event: ServerEvent) => void;
 
@@ -462,6 +462,13 @@ export class OrchestratorService {
       });
     } catch (error) {
       const payload = toErrorPayload(error);
+      if (payload.code === 'TTS_STREAM_CANCELLED') {
+        this.logger.log(
+          `tts.stream.cancelled session=${sessionId} turn=${turnId}`,
+        );
+        return;
+      }
+
       emit({
         type: 'error',
         sessionId,
@@ -494,7 +501,10 @@ export class OrchestratorService {
             this.logger.log(
               `tts.stream.chunk.skip_stale session=${sessionId} turn=${turnId}`,
             );
-            return;
+            throw new AppError(
+              'TTS_STREAM_CANCELLED',
+              'TTS stream cancelled because the turn is stale.',
+            );
           }
 
           emit({

@@ -28,6 +28,7 @@ export const envSchema = z.object({
     .min(1)
     .default('Systran/faster-distil-whisper-large-v3'),
   LOCAL_STT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  PARTIAL_STT_ENABLED: booleanFromEnv.default(false),
   TTS_ENABLED: booleanFromEnv.default(false),
   GROQ_TTS_MODEL: z.string().min(1).default('canopylabs/orpheus-v1-english'),
   GROQ_TTS_VOICE: z.string().min(1).default('hannah'),

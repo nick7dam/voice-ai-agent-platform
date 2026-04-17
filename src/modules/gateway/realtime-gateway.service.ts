@@ -268,6 +268,11 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
     event: Extract<ParsedClientEvent, { type: 'audio.partial' }>,
   ): Promise<void> {
     const sessionId = this.resolveSessionId(client, event);
+
+    if (!this.config.stt.partialEnabled) {
+      return;
+    }
+
     const session = this.sessions.get(sessionId);
     const turnId =
       session.audio.turnId ??

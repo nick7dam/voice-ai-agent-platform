@@ -17,7 +17,7 @@ MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "Systran/faster-distil-whisper-large-v
 DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"
 COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_COMPUTE_TYPE)
-PORT = int(os.getenv("LOCAL_STT_PORT", "8003"))
+PORT = int(os.getenv("LOCAL_STT_PORT", "8001"))
 PRELOAD = os.getenv("LOCAL_STT_PRELOAD", "true").lower() in {
     "1",
     "true",
@@ -30,12 +30,13 @@ WARMUP = os.getenv("LOCAL_STT_WARMUP", "true").lower() in {
     "yes",
     "on",
 }
-VAD_FILTER = os.getenv("LOCAL_STT_VAD_FILTER", "true").lower() in {
+VAD_FILTER = os.getenv("LOCAL_STT_VAD_FILTER", "false").lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
+DEFAULT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 
 logging.basicConfig(level=os.getenv("LOCAL_STT_LOG_LEVEL", "INFO").upper())
 
@@ -155,6 +156,7 @@ def health():
         "device": DEVICE,
         "computeType": COMPUTE_TYPE,
         "vadFilter": VAD_FILTER,
+        "language": DEFAULT_LANGUAGE,
         "preload": PRELOAD,
         "warmup": WARMUP,
         "loaded": model is not None,
@@ -193,7 +195,7 @@ def transcribe(request: TranscribeRequest):
     try:
         segments, info = get_model().transcribe(
             str(temp_path),
-            language=request.language,
+            language=request.language or DEFAULT_LANGUAGE,
             beam_size=1,
             best_of=1,
             vad_filter=VAD_FILTER,

@@ -61,6 +61,8 @@ STT:
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3 \
 LOCAL_STT_DEVICE=cpu \
 LOCAL_STT_COMPUTE_TYPE=int8 \
+LOCAL_STT_LANGUAGE=en \
+LOCAL_STT_VAD_FILTER=false \
 LOCAL_STT_PRELOAD=true \
 LOCAL_STT_WARMUP=true \
 .venv-stt/bin/python services/local-ai/stt_server.py
@@ -92,7 +94,7 @@ with:
 ```bash
 .venv-stt/bin/python -m pip install -r services/local-ai/requirements-stt-cuda.txt
 export LD_LIBRARY_PATH="$(.venv-stt/bin/python scripts/print-cuda-library-path.py):${LD_LIBRARY_PATH:-}"
-LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_STT_PRELOAD=true LOCAL_STT_WARMUP=true .venv-stt/bin/python services/local-ai/stt_server.py
+LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_STT_LANGUAGE=en LOCAL_STT_VAD_FILTER=false LOCAL_STT_PRELOAD=true LOCAL_STT_WARMUP=true .venv-stt/bin/python services/local-ai/stt_server.py
 ```
 
 Or use the pnpm helper, which sets `LD_LIBRARY_PATH` for the process:
