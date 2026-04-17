@@ -408,11 +408,14 @@ src/modules/orchestrator/prompt-builder.service.ts
 Demo tools:
 
 - `get_current_time`
-- `calculate_expression`
+- `check_service_hours`
+- `get_service_location`
+- `check_service_availability`
+- `create_service_booking`
 - `remember_fact`
 - `list_memory`
 
-Each tool has a name, description, Zod input schema, JSON-schema-like parameters for the LLM, and a deterministic `execute()` method. The calculator uses a small restricted parser rather than `eval`.
+Each tool has a name, description, Zod input schema, JSON-schema-like parameters for the LLM, and a deterministic `execute()` method. The car service tools are local demo tools; they do not call a real calendar or external business backend yet.
 
 Add future tools under:
 

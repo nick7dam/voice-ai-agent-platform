@@ -5,6 +5,10 @@ import {
   ToolDefinition,
 } from '../../common/types/tool.types';
 import { CalculateExpressionTool } from './tools/calculate-expression.tool';
+import { CheckServiceAvailabilityTool } from './tools/check-service-availability.tool';
+import { CheckServiceHoursTool } from './tools/check-service-hours.tool';
+import { CreateServiceBookingTool } from './tools/create-service-booking.tool';
+import { GetServiceLocationTool } from './tools/get-service-location.tool';
 import { GetCurrentTimeTool } from './tools/get-current-time.tool';
 import { ListMemoryTool } from './tools/list-memory.tool';
 import { RememberFactTool } from './tools/remember-fact.tool';
@@ -18,12 +22,20 @@ export class ToolRegistryService {
     calculateExpression: CalculateExpressionTool,
     rememberFact: RememberFactTool,
     listMemory: ListMemoryTool,
+    checkServiceHours: CheckServiceHoursTool,
+    getServiceLocation: GetServiceLocationTool,
+    checkServiceAvailability: CheckServiceAvailabilityTool,
+    createServiceBooking: CreateServiceBookingTool,
   ) {
     const definitions = [
       getCurrentTime.definition,
       calculateExpression.definition,
       rememberFact.definition,
       listMemory.definition,
+      checkServiceHours.definition,
+      getServiceLocation.definition,
+      checkServiceAvailability.definition,
+      createServiceBooking.definition,
     ];
 
     this.tools = new Map(definitions.map((tool) => [tool.name, tool]));

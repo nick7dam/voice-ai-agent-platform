@@ -330,7 +330,16 @@ export class OrchestratorService {
       ) ||
       /\b(time|date|today|timezone)\b/.test(lower) ||
       /\b(calculate|math|plus|minus|times|divided by)\b/.test(lower) ||
-      /\d\s*[-+*/^]\s*\d/.test(lower)
+      /\d\s*[-+*/^]\s*\d/.test(lower) ||
+      /\b(book|booking|appointment|schedule|available|availability|slot|tomorrow|morning|afternoon)\b/.test(
+        lower,
+      ) ||
+      /\b(open|closed|hours|location|address|where are you|directions|parking|phone number)\b/.test(
+        lower,
+      ) ||
+      /\b(service|logbook|oil change|brake|brakes|tyre|tire|roadworthy|diagnostic|inspection|rego|vehicle|car)\b/.test(
+        lower,
+      )
     );
   }
 
