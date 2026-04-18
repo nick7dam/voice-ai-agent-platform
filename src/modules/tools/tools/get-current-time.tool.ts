@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { ToolDefinition } from '../../../common/types/tool.types';
+import { normalizeTextForSpeech } from '../../../common/utils/speech-text-normalizer';
 
 const schema = z.object({
   timeZone: z.string().optional(),
@@ -26,6 +27,18 @@ export class GetCurrentTimeTool {
     execute: (input) => {
       const now = new Date();
       const timeZone = input.timeZone;
+      const resolvedTimeZone =
+        timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const localTime = new Intl.DateTimeFormat('en-AU', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+        timeZone,
+      }).format(now);
+      const localDate = new Intl.DateTimeFormat('en-AU', {
+        dateStyle: 'full',
+        timeZone,
+      }).format(now);
 
       return Promise.resolve({
         iso: now.toISOString(),
@@ -34,7 +47,11 @@ export class GetCurrentTimeTool {
           timeStyle: 'long',
           timeZone,
         }).format(now),
-        timeZone: timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        localTime,
+        spokenTime: normalizeTextForSpeech(localTime),
+        localDate,
+        spokenLocal: `${normalizeTextForSpeech(localTime)} on ${localDate}`,
+        timeZone: resolvedTimeZone,
       });
     },
   };

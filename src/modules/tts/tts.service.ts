@@ -10,6 +10,7 @@ import {
   TtsSegment,
   TtsSynthesisInput,
 } from '../../common/types/tts.types';
+import { normalizeTextForSpeech } from '../../common/utils/speech-text-normalizer';
 import type { AppConfig } from '../../config/app.config';
 import type { TtsAdapter } from './tts-adapter.interface';
 
@@ -52,7 +53,7 @@ export class TtsService {
   }
 
   splitText(text: string): TtsSegment[] {
-    const normalized = text.replace(/\s+/g, ' ').trim();
+    const normalized = normalizeTextForSpeech(text);
 
     if (!normalized) {
       return [];
