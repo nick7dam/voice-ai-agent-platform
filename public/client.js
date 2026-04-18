@@ -1360,16 +1360,22 @@ function clearWebRtcDisconnectTimer() {
   state.webrtcDisconnectTimer = null;
 }
 
-function muteWebRtcAudioBriefly(durationMs = 220) {
+function unmuteWebRtcAudio() {
   if (state.webrtcMuteTimer) {
     window.clearTimeout(state.webrtcMuteTimer);
+    state.webrtcMuteTimer = null;
+  }
+
+  el.webrtcAudio.muted = false;
+}
+
+function muteWebRtcAudioUntilNextAssistant() {
+  if (state.webrtcMuteTimer) {
+    window.clearTimeout(state.webrtcMuteTimer);
+    state.webrtcMuteTimer = null;
   }
 
   el.webrtcAudio.muted = true;
-  state.webrtcMuteTimer = window.setTimeout(() => {
-    el.webrtcAudio.muted = false;
-    state.webrtcMuteTimer = null;
-  }, durationMs);
 }
 
 function handleWebRtcGatewayEvent(event) {
@@ -1419,7 +1425,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.tts.started') {
-    el.webrtcAudio.muted = false;
+    unmuteWebRtcAudio();
     setStatus('WebRTC speaking...');
   }
 
@@ -1428,7 +1434,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.audio.cleared') {
-    muteWebRtcAudioBriefly();
+    muteWebRtcAudioUntilNextAssistant();
     setStatus('WebRTC interrupted');
   }
 
@@ -1729,10 +1735,7 @@ async function stopWebRtcVoice(options = {}) {
 
   state.webrtcActive = false;
   clearWebRtcDisconnectTimer();
-  if (state.webrtcMuteTimer) {
-    window.clearTimeout(state.webrtcMuteTimer);
-    state.webrtcMuteTimer = null;
-  }
+  unmuteWebRtcAudio();
 
   if (
     notifyGateway &&
@@ -1753,7 +1756,6 @@ async function stopWebRtcVoice(options = {}) {
   state.webrtcRemoteStream?.getTracks().forEach((track) => track.stop());
   state.webrtcRemoteStream = null;
   el.webrtcAudio.srcObject = null;
-  el.webrtcAudio.muted = false;
 
   state.webrtcSignalSocket?.close();
   state.webrtcSignalSocket = null;
