@@ -20,16 +20,50 @@ export const carServiceHours = [
   { day: 'Sunday', open: '', close: '', closed: true },
 ];
 
-export const serviceTypes = [
-  'logbook service',
-  'minor service',
-  'major service',
-  'oil change',
-  'brake inspection',
-  'tyre rotation',
-  'roadworthy inspection',
-  'diagnostic check',
+export const serviceCatalog = [
+  {
+    name: 'logbook service',
+    durationMinutes: 120,
+    intakeQuestion: 'What is the make, model, year, and odometer reading?',
+  },
+  {
+    name: 'minor service',
+    durationMinutes: 90,
+    intakeQuestion: 'When was the car last serviced?',
+  },
+  {
+    name: 'major service',
+    durationMinutes: 180,
+    intakeQuestion: 'Do you know the current kilometres and service history?',
+  },
+  {
+    name: 'oil change',
+    durationMinutes: 60,
+    intakeQuestion: 'Do you know the engine size or oil grade?',
+  },
+  {
+    name: 'brake inspection',
+    durationMinutes: 90,
+    intakeQuestion: 'Are the brakes noisy, soft, or vibrating?',
+  },
+  {
+    name: 'tyre rotation',
+    durationMinutes: 45,
+    intakeQuestion: 'Do you also need wheel balancing or a tyre check?',
+  },
+  {
+    name: 'roadworthy inspection',
+    durationMinutes: 120,
+    intakeQuestion: 'Is this for sale, transfer, or registration?',
+  },
+  {
+    name: 'diagnostic check',
+    durationMinutes: 90,
+    intakeQuestion: 'What warning lights or symptoms are you noticing?',
+  },
 ];
+
+export const serviceTypes = serviceCatalog.map((service) => service.name);
 
 const weekdaySlots = ['08:30', '10:00', '13:30', '15:00'];
 const saturdaySlots = ['09:00', '10:30'];

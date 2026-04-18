@@ -18,6 +18,7 @@ export type OrchestratorEmit = (event: ServerEvent) => void;
 @Injectable()
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
+  private readonly callEndMarker = '[[END_CALL]]';
 
   constructor(
     private readonly sessions: SessionsService,
@@ -87,10 +88,28 @@ export class OrchestratorService {
 
       this.logger.log(`reasoning.start session=${sessionId} turn=${turnId}`);
       let earlyAudioStarted = false;
+      let firstTokenEmitted = false;
       let speechCursor = 0;
       let speechTextChunkIndex = 0;
       let queuedSpeech = Promise.resolve();
       let streamedText = '';
+      const emitFirstToken = (source: 'stream' | 'generate') => {
+        if (firstTokenEmitted) {
+          return;
+        }
+
+        firstTokenEmitted = true;
+        emit({
+          type: 'reasoning.first_token',
+          sessionId,
+          timestamp: nowIso(),
+          payload: {
+            turnId,
+            latencyMs: elapsedMs(startedAt),
+            source,
+          },
+        });
+      };
       const emitSpeechTextChunk = (text: string, final: boolean) => {
         const speech = text.replace(/\s+/g, ' ').trim();
 
@@ -156,6 +175,9 @@ export class OrchestratorService {
             {
               onTextDelta: (delta) => {
                 streamedText += delta;
+                if (delta.trim()) {
+                  emitFirstToken('stream');
+                }
 
                 const chunks = this.extractSpeechChunks(
                   streamedText,
@@ -185,6 +207,9 @@ export class OrchestratorService {
 
       let finalText = initial.text;
       let providerLatencyMs = initial.latencyMs;
+      if (shouldUseTools) {
+        emitFirstToken('generate');
+      }
 
       if (initial.toolCalls.length > 0) {
         const toolResults = await this.executeTools(
@@ -220,6 +245,9 @@ export class OrchestratorService {
         return;
       }
 
+      const shouldEndCall =
+        this.shouldEndCall(finalText) ||
+        this.isCallEndingUserText(trimmedTranscript);
       const safeText = this.normalizeAssistantText(finalText, task);
       const totalLatencyMs = elapsedMs(startedAt);
       this.sessions.appendHistory(sessionId, {
@@ -253,6 +281,18 @@ export class OrchestratorService {
           latencyMs: totalLatencyMs,
         },
       });
+
+      if (shouldEndCall) {
+        emit({
+          type: 'session.end_requested',
+          sessionId,
+          timestamp: nowIso(),
+          payload: {
+            turnId,
+            reason: 'assistant_completed_call',
+          },
+        });
+      }
 
       if (!earlyAudioStarted) {
         void this.emitAssistantAudio(sessionId, turnId, safeText, emit);
@@ -342,8 +382,22 @@ export class OrchestratorService {
 
   private normalizeAssistantText(text: string, task: TaskConfig): string {
     const fallback = 'Done.';
-    const compact = (text || fallback).replace(/\r/g, '').trim() || fallback;
+    const compact =
+      (text || fallback)
+        .replaceAll(this.callEndMarker, '')
+        .replace(/\r/g, '')
+        .trim() || fallback;
     return compact.slice(0, task.responsePolicy.maxResponseChars);
+  }
+
+  private shouldEndCall(text: string): boolean {
+    return text.includes(this.callEndMarker);
+  }
+
+  private isCallEndingUserText(text: string): boolean {
+    return /\b(bye|goodbye|that'?s all|that is all|nothing else|no thanks|no thank you|all good|end the call|hang up)\b/i.test(
+      text,
+    );
   }
 
   private shouldUseTools(transcript: string): boolean {
@@ -360,6 +414,9 @@ export class OrchestratorService {
         lower,
       ) ||
       /\b(open|closed|hours|location|address|where are you|directions|parking|phone number)\b/.test(
+        lower,
+      ) ||
+      /\b(name is|my name|phone|mobile|number is|rego|registration|plate|license plate|licence plate)\b/.test(
         lower,
       ) ||
       /\b(service|logbook|oil change|brake|brakes|tyre|tire|roadworthy|diagnostic|inspection|rego|vehicle|car)\b/.test(

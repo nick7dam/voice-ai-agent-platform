@@ -50,6 +50,17 @@ TTS_ENABLED = os.getenv("VOICE_GATEWAY_TTS_ENABLED", "true").lower() in {
     "yes",
     "on",
 }
+GREETING_ENABLED = os.getenv("VOICE_GATEWAY_GREETING_ENABLED", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+GREETING_TEXT = os.getenv(
+    "VOICE_GATEWAY_GREETING_TEXT",
+    "Hi, this is Northside Auto Service's AI receptionist. I can help with bookings, hours, location, and service questions. How can I help you today?",
+)
+CALL_END_MARKER = "[[END_CALL]]"
 
 INPUT_SAMPLE_RATE = 16000
 MIN_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_MIN_SPEECH_THRESHOLD", "0.025"))
@@ -58,14 +69,15 @@ SILENCE_MS = int(os.getenv("VOICE_VAD_SILENCE_MS", "420"))
 MAX_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MAX_UTTERANCE_MS", "8000"))
 MIN_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MIN_UTTERANCE_MS", "320"))
 MIN_SPEECH_MS = int(os.getenv("VOICE_VAD_MIN_SPEECH_MS", "240"))
-MIN_BARGE_SPEECH_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_MS", "260"))
+MIN_BARGE_SPEECH_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_MS", "340"))
 END_THRESHOLD_PEAK_RATIO = float(os.getenv("VOICE_VAD_END_PEAK_RATIO", "0.35"))
 MIN_PEAK_LEVEL = float(os.getenv("VOICE_VAD_MIN_PEAK_LEVEL", "0.035"))
-BARGE_MIN_PEAK_LEVEL = float(os.getenv("VOICE_VAD_BARGE_MIN_PEAK_LEVEL", "0.05"))
+BARGE_MIN_PEAK_LEVEL = float(os.getenv("VOICE_VAD_BARGE_MIN_PEAK_LEVEL", "0.065"))
 BARGE_THRESHOLD_MULTIPLIER = float(
-    os.getenv("VOICE_VAD_BARGE_THRESHOLD_MULTIPLIER", "2.0")
+    os.getenv("VOICE_VAD_BARGE_THRESHOLD_MULTIPLIER", "2.4")
 )
-BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "120"))
+BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "220"))
+BARGE_START_GRACE_MS = int(os.getenv("VOICE_VAD_BARGE_START_GRACE_MS", "350"))
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 
 WEBRTC_ICE_SERVERS_JSON = os.getenv("WEBRTC_ICE_SERVERS_JSON", "").strip()
@@ -73,6 +85,7 @@ WEBRTC_STUN_URLS = os.getenv("WEBRTC_STUN_URLS", "").strip()
 WEBRTC_TURN_URLS = os.getenv("WEBRTC_TURN_URLS", "").strip()
 WEBRTC_TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "").strip()
 WEBRTC_TURN_CREDENTIAL = os.getenv("WEBRTC_TURN_CREDENTIAL", "").strip()
+WEBRTC_ICE_TRANSPORT_POLICY = os.getenv("WEBRTC_ICE_TRANSPORT_POLICY", "all").strip()
 
 logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
@@ -168,6 +181,16 @@ def aiortc_ice_servers() -> List[RTCIceServer]:
     return servers
 
 
+def browser_ice_transport_policy() -> str:
+    if WEBRTC_ICE_TRANSPORT_POLICY in {"all", "relay"}:
+        return WEBRTC_ICE_TRANSPORT_POLICY
+
+    logger.warning(
+        "voice.ice.invalid_transport_policy value=%s", WEBRTC_ICE_TRANSPORT_POLICY
+    )
+    return "all"
+
+
 def elapsed_ms(started_at: float) -> int:
     return int((time.perf_counter() - started_at) * 1000)
 
@@ -228,6 +251,7 @@ def normalize_text_for_speech(text: str) -> str:
         meridiem = (match.group(3) or "").lower().replace(".", "")
         return format_time_for_speech(hour, minute, meridiem or None)
 
+    text = strip_tts_asides(text)
     text = re.sub(
         r"\b([01]?\d|2[0-3]):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?\b",
         replace_time,
@@ -244,12 +268,47 @@ def normalize_text_for_speech(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    return (
+    replacements = [
+        (r"\bi\.?\s*e\.?(?=\W|$)", "that is"),
+        (r"\be\.?\s*g\.?(?=\W|$)", "for example"),
+        (r"\betc(?=\W|$)", "and so on"),
+        (r"\bapprox\.?(?=\W|$)", "approximately"),
+        (r"\basap\b", "as soon as possible"),
+        (r"\beta\b", "estimated arrival time"),
+        (r"\bvin\b", "vehicle identification number"),
+        (r"\brego\b", "registration"),
+        (r"\bno\.\s*(?=\d)", "number "),
+        (r"\bvs\.?(?=\W|$)", "versus"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+
+    text = (
         text.replace("&", "and")
+        .replace("@", " at ")
         .replace(" VIC", " Victoria")
         .replace(" NSW", " New South Wales")
         .replace(" QLD", " Queensland")
+        .replace(" ACT", " Australian Capital Territory")
+        .replace(" WA", " Western Australia")
+        .replace(" SA", " South Australia")
+        .replace(" TAS", " Tasmania")
+        .replace(" NT", " Northern Territory")
     )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_tts_asides(text: str) -> str:
+    text = text.replace(CALL_END_MARKER, "")
+
+    def replace_parenthetical(match: re.Match[str]) -> str:
+        content = match.group(1).strip()
+        if re.fullmatch(r"[\d\s+\-]+", content):
+            return f" {content} "
+        return " "
+
+    text = re.sub(r"\(([^()]*)\)", replace_parenthetical, text)
+    return text
 
 
 def format_time_for_speech(hour: int, minute: int, meridiem: Optional[str]) -> str:
@@ -436,6 +495,18 @@ class VadTurn:
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, dtype=np.float32)
 
 
+@dataclass
+class TurnLatency:
+    local_turn_id: int
+    stt_started_at: float
+    stt_ended_at: Optional[float] = None
+    text_sent_at: Optional[float] = None
+    turn_id: Optional[str] = None
+    first_token_at: Optional[float] = None
+    first_text_at: Optional[float] = None
+    first_audio_at: Optional[float] = None
+
+
 class VoiceActivityDetector:
     def __init__(self, session: "VoiceSession"):
         self.session = session
@@ -497,17 +568,22 @@ class VoiceActivityDetector:
             self.barge_candidate_ms = 0
             return level >= threshold
 
+        grace_active = self.session.is_in_assistant_barge_grace()
         barge_threshold = max(
             BARGE_MIN_PEAK_LEVEL,
             MIN_SPEECH_THRESHOLD,
             threshold * BARGE_THRESHOLD_MULTIPLIER,
         )
+        if grace_active:
+            barge_threshold = max(barge_threshold, BARGE_MIN_PEAK_LEVEL * 1.25)
+
         if level < barge_threshold:
             self.barge_candidate_ms = 0
             return False
 
         self.barge_candidate_ms += duration_ms
-        return self.barge_candidate_ms >= BARGE_HOLD_MS
+        required_hold_ms = BARGE_HOLD_MS * 1.25 if grace_active else BARGE_HOLD_MS
+        return self.barge_candidate_ms >= required_hold_ms
 
     async def start_turn(self, now: float, threshold: float) -> None:
         started_during_assistant = self.session.is_assistant_interruptible()
@@ -609,6 +685,11 @@ class NestControlClient:
             return
         await self.send({"type": "session.interrupt", "payload": {"reason": reason}})
 
+    async def end_session(self) -> None:
+        if self.ws is None:
+            return
+        await self.send({"type": "session.end", "payload": {}})
+
     async def send(self, event: Dict[str, Any]) -> None:
         if self.ws is not None:
             await self.ws.send(json.dumps(event))
@@ -621,10 +702,16 @@ class NestControlClient:
 
                 if event_type == "session.started":
                     self.ready.set()
+                elif event_type == "transcript.final":
+                    await self.session.attach_turn_latency(event)
+                elif event_type == "reasoning.first_token":
+                    await self.session.mark_first_token(event)
                 elif event_type == "assistant.text.chunk":
                     await self.session.handle_assistant_text_chunk(event)
                 elif event_type == "assistant.response":
                     await self.session.handle_assistant_response(event)
+                elif event_type == "session.end_requested":
+                    await self.session.handle_session_end_requested(event)
                 elif event_type == "session.interrupted":
                     await self.session.clear_assistant_audio("nest_interrupted")
 
@@ -664,6 +751,13 @@ class VoiceSession:
         self.tts_generation = 0
         self.assistant_speaking = False
         self.last_assistant_audio_at = 0.0
+        self.assistant_audio_started_at = 0.0
+        self.local_turn_sequence = 0
+        self.pending_turn_latencies: list[TurnLatency] = []
+        self.turn_latencies: Dict[str, TurnLatency] = {}
+        self.greeting_sent = False
+        self.pending_end_turn_id: Optional[str] = None
+        self.call_ending = False
 
     async def start_control(self, task_key: str) -> None:
         self.control = NestControlClient(self, task_key)
@@ -690,13 +784,16 @@ class VoiceSession:
 
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange() -> None:
+            state = self.pc.connectionState if self.pc else "closed"
             await self.send_browser_event(
                 {
                     "type": "gateway.peer.state",
                     "timestamp": now_iso(),
-                    "payload": {"state": self.pc.connectionState if self.pc else "closed"},
+                    "payload": {"state": state},
                 }
             )
+            if state == "connected":
+                asyncio.create_task(self.play_greeting())
 
         await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
         answer = await self.pc.createAnswer()
@@ -739,6 +836,32 @@ class VoiceSession:
         recent = time.monotonic() - self.last_assistant_audio_at < 1.5
         return self.assistant_speaking or not self.tts_queue.empty() or recent
 
+    def is_in_assistant_barge_grace(self) -> bool:
+        if self.assistant_audio_started_at <= 0:
+            return False
+
+        return (
+            time.monotonic() - self.assistant_audio_started_at
+        ) * 1000 < BARGE_START_GRACE_MS
+
+    async def play_greeting(self) -> None:
+        if self.greeting_sent or not GREETING_ENABLED or not TTS_ENABLED:
+            return
+
+        self.greeting_sent = True
+        text = GREETING_TEXT.strip()
+        if not text:
+            return
+
+        await self.send_browser_event(
+            {
+                "type": "gateway.greeting",
+                "timestamp": now_iso(),
+                "payload": {"text": text},
+            }
+        )
+        await self.tts_queue.put(("gateway-greeting", text))
+
     async def interrupt_assistant(self, reason: str) -> None:
         await self.clear_assistant_audio(reason)
         if self.control:
@@ -766,8 +889,111 @@ class VoiceSession:
             }
         )
 
+    async def handle_session_end_requested(self, event: Dict[str, Any]) -> None:
+        payload = event.get("payload") or {}
+        turn_id = str(payload.get("turnId") or "")
+        self.pending_end_turn_id = turn_id or self.current_assistant_turn_id
+
+        asyncio.create_task(self.end_call_when_audio_idle("assistant_completed_call"))
+
+    async def end_call_when_audio_idle(self, reason: str) -> None:
+        await asyncio.sleep(0.15)
+        while not self.closed and (self.assistant_speaking or not self.tts_queue.empty()):
+            await asyncio.sleep(0.05)
+
+        await self.end_call(reason)
+
+    async def end_call(self, reason: str) -> None:
+        if self.call_ending:
+            return
+
+        self.call_ending = True
+        await self.send_browser_event(
+            {
+                "type": "gateway.call.ended",
+                "timestamp": now_iso(),
+                "payload": {"reason": reason},
+            }
+        )
+
+        if self.control:
+            try:
+                await self.control.end_session()
+            except Exception as exc:
+                logger.warning("voice.nest.end_session_failed error=%s", exc)
+
+        await asyncio.sleep(0.35)
+        await self.close()
+
+    def begin_turn_latency(self) -> TurnLatency:
+        self.local_turn_sequence += 1
+        return TurnLatency(
+            local_turn_id=self.local_turn_sequence,
+            stt_started_at=time.perf_counter(),
+        )
+
+    async def attach_turn_latency(self, event: Dict[str, Any]) -> None:
+        payload = event.get("payload") or {}
+        turn_id = str(payload.get("turnId") or "")
+        if not turn_id or not self.pending_turn_latencies:
+            return
+
+        metric = self.pending_turn_latencies.pop(0)
+        metric.turn_id = turn_id
+        self.turn_latencies[turn_id] = metric
+        await self.emit_latency_update(metric)
+
+    async def mark_first_token(self, event: Dict[str, Any]) -> None:
+        payload = event.get("payload") or {}
+        turn_id = str(payload.get("turnId") or "")
+        metric = self.turn_latencies.get(turn_id)
+        if metric is None or metric.first_token_at is not None:
+            return
+
+        metric.first_token_at = time.perf_counter()
+        await self.emit_latency_update(metric)
+
+    async def mark_first_text(self, turn_id: str) -> None:
+        metric = self.turn_latencies.get(turn_id)
+        if metric is None or metric.first_text_at is not None:
+            return
+
+        metric.first_text_at = time.perf_counter()
+        await self.emit_latency_update(metric)
+
+    async def mark_first_audio(self, turn_id: str) -> None:
+        metric = self.turn_latencies.get(turn_id)
+        if metric is None or metric.first_audio_at is not None:
+            return
+
+        metric.first_audio_at = time.perf_counter()
+        await self.emit_latency_update(metric)
+
+    async def emit_latency_update(self, metric: TurnLatency) -> None:
+        def delta_ms(start: Optional[float], end: Optional[float]) -> Optional[int]:
+            if start is None or end is None:
+                return None
+            return int((end - start) * 1000)
+
+        await self.send_browser_event(
+            {
+                "type": "gateway.latency.updated",
+                "timestamp": now_iso(),
+                "payload": {
+                    "localTurnId": metric.local_turn_id,
+                    "turnId": metric.turn_id,
+                    "sttMs": delta_ms(metric.stt_started_at, metric.stt_ended_at),
+                    "firstTokenMs": delta_ms(metric.text_sent_at, metric.first_token_at),
+                    "firstTextMs": delta_ms(metric.text_sent_at, metric.first_text_at),
+                    "firstAudioMs": delta_ms(metric.text_sent_at, metric.first_audio_at),
+                    "textToAudioMs": delta_ms(metric.first_text_at, metric.first_audio_at),
+                },
+            }
+        )
+
     async def handle_user_audio(self, samples: np.ndarray) -> None:
-        started_at = time.perf_counter()
+        metric = self.begin_turn_latency()
+        started_at = metric.stt_started_at
         await self.send_browser_event(
             {
                 "type": "gateway.transcription.started",
@@ -776,6 +1002,7 @@ class VoiceSession:
             }
         )
         text, latency_ms = await asyncio.to_thread(transcribe_samples, samples)
+        metric.stt_ended_at = time.perf_counter()
         text = text.strip()
         logger.info(
             "voice.stt.end chars=%d latencyMs=%d totalLatencyMs=%d",
@@ -795,6 +1022,8 @@ class VoiceSession:
             return
 
         if self.control:
+            metric.text_sent_at = time.perf_counter()
+            self.pending_turn_latencies.append(metric)
             await self.control.send_text(text)
 
     async def handle_assistant_text_chunk(self, event: Dict[str, Any]) -> None:
@@ -802,7 +1031,12 @@ class VoiceSession:
         turn_id = str(payload.get("turnId") or "")
         text = str(payload.get("text") or "").strip()
 
-        if not TTS_ENABLED or not turn_id or not text:
+        if not turn_id or not text:
+            return
+
+        await self.mark_first_text(turn_id)
+
+        if not TTS_ENABLED:
             return
 
         if turn_id in self.cancelled_turn_ids:
@@ -817,7 +1051,12 @@ class VoiceSession:
         turn_id = str(payload.get("turnId") or "")
         text = str(payload.get("text") or "").strip()
 
-        if not TTS_ENABLED or not turn_id or not text:
+        if not turn_id or not text:
+            return
+
+        await self.mark_first_text(turn_id)
+
+        if not TTS_ENABLED:
             return
 
         if turn_id in self.cancelled_turn_ids or turn_id in self.turns_with_spoken_chunks:
@@ -837,6 +1076,7 @@ class VoiceSession:
 
             self.assistant_speaking = True
             self.last_assistant_audio_at = time.monotonic()
+            self.assistant_audio_started_at = self.last_assistant_audio_at
             started_at = time.perf_counter()
             await self.send_browser_event(
                 {
@@ -862,6 +1102,8 @@ class VoiceSession:
                             },
                         }
                     )
+                    if self.pending_end_turn_id == turn_id:
+                        asyncio.create_task(self.end_call("assistant_completed_call"))
 
     async def synthesize_to_track(self, turn_id: str, text: str, generation: int) -> None:
         loop = asyncio.get_running_loop()
@@ -887,6 +1129,11 @@ class VoiceSession:
                 loop,
             )
             future.result()
+            if chunk_count == 1:
+                asyncio.run_coroutine_threadsafe(
+                    self.mark_first_audio(turn_id),
+                    loop,
+                ).result()
             self.last_assistant_audio_at = time.monotonic()
 
         logger.info(
@@ -979,6 +1226,7 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
                         "nestWsUrl": NEST_WS_URL,
                         "taskKey": task_key,
                         "iceServers": browser_ice_servers(),
+                        "iceTransportPolicy": browser_ice_transport_policy(),
                     },
                 )
             elif message_type == "offer":
@@ -1022,7 +1270,7 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
 async def main() -> None:
     ice_servers = browser_ice_servers()
     logger.info(
-        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s tts=%s/%s iceServers=%d",
+        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s tts=%s/%s iceServers=%d iceTransportPolicy=%s",
         HOST,
         PORT,
         NEST_WS_URL,
@@ -1031,6 +1279,7 @@ async def main() -> None:
         TTS_MODEL_NAME,
         resolve_tts_device(),
         len(ice_servers),
+        browser_ice_transport_policy(),
     )
 
     async with websockets.serve(

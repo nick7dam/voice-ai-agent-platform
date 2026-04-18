@@ -17,6 +17,7 @@ export type ServerEventType =
   | 'session.started'
   | 'session.ended'
   | 'session.interrupted'
+  | 'session.end_requested'
   | 'session.audio_output.updated'
   | 'audio.stream.started'
   | 'audio.stream.stopped'
@@ -25,6 +26,7 @@ export type ServerEventType =
   | 'transcript.partial'
   | 'transcript.final'
   | 'reasoning.started'
+  | 'reasoning.first_token'
   | 'tool.called'
   | 'tool.result'
   | 'assistant.text.chunk'
@@ -91,6 +93,7 @@ export type ServerEvent =
     >
   | BaseServerEvent<'session.ended', { sessionId: string }>
   | BaseServerEvent<'session.interrupted', { reason?: string }>
+  | BaseServerEvent<'session.end_requested', { turnId: string; reason: string }>
   | BaseServerEvent<'session.audio_output.updated', { enabled: boolean }>
   | BaseServerEvent<'audio.stream.started', { mimeType?: string }>
   | BaseServerEvent<'audio.stream.stopped', Record<string, never>>
@@ -111,6 +114,10 @@ export type ServerEvent =
       { turnId: string; text: string; latencyMs: number }
     >
   | BaseServerEvent<'reasoning.started', { turnId: string }>
+  | BaseServerEvent<
+      'reasoning.first_token',
+      { turnId: string; latencyMs: number; source: 'stream' | 'generate' }
+    >
   | BaseServerEvent<'tool.called', { turnId: string; toolCall: ToolCall }>
   | BaseServerEvent<
       'tool.result',

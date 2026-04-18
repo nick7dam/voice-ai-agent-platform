@@ -133,6 +133,32 @@
         min-height: 24px;
       }
 
+      .latency-strip {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .latency-item {
+        background: #ffffff;
+        border: 1px solid #d4dae4;
+        border-radius: 8px;
+        padding: 8px 10px;
+      }
+
+      .latency-label {
+        display: block;
+        color: #5a6676;
+        font-size: 12px;
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+
+      .latency-value {
+        font-weight: 800;
+      }
+
       .task-status {
         margin-top: 10px;
         color: #435064;
@@ -223,6 +249,10 @@
         .field-row {
           grid-template-columns: 1fr;
         }
+
+        .latency-strip {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
@@ -275,6 +305,20 @@
         </div>
 
         <div id="status" class="status">Disconnected</div>
+        <div class="latency-strip" aria-label="Voice latency metrics">
+          <div class="latency-item">
+            <span class="latency-label">STT</span>
+            <span id="latencyStt" class="latency-value">--</span>
+          </div>
+          <div class="latency-item">
+            <span class="latency-label">First token</span>
+            <span id="latencyFirstToken" class="latency-value">--</span>
+          </div>
+          <div class="latency-item">
+            <span class="latency-label">First audio</span>
+            <span id="latencyFirstAudio" class="latency-value">--</span>
+          </div>
+        </div>
 
         <h1>Task Settings</h1>
         <p>

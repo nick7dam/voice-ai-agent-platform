@@ -39,8 +39,10 @@ const stateNames: Record<string, string> = {
   WA: 'Western Australia',
 };
 
+const callEndMarker = '[[END_CALL]]';
+
 export function normalizeTextForSpeech(text: string): string {
-  return text
+  return stripSpeechAsides(text)
     .replace(
       /\b([01]?\d|2[0-3]):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?\b/gi,
       (_match: string, hour: string, minute: string, meridiem?: string) =>
@@ -53,13 +55,32 @@ export function normalizeTextForSpeech(text: string): string {
     )
     .replace(/\b(?:a\.?m\.?)\b/gi, 'in the morning')
     .replace(/\b(?:p\.?m\.?)\b/gi, 'in the afternoon')
+    .replace(/\bi\.?\s*e\.?(?=\W|$)/gi, 'that is')
+    .replace(/\be\.?\s*g\.?(?=\W|$)/gi, 'for example')
+    .replace(/\betc(?=\W|$)/gi, 'and so on')
+    .replace(/\bapprox\.?(?=\W|$)/gi, 'approximately')
+    .replace(/\basap\b/gi, 'as soon as possible')
+    .replace(/\beta\b/gi, 'estimated arrival time')
+    .replace(/\bvin\b/gi, 'vehicle identification number')
+    .replace(/\brego\b/gi, 'registration')
+    .replace(/\bno\.\s*(?=\d)/gi, 'number ')
+    .replace(/\bvs\.?(?=\W|$)/gi, 'versus')
     .replace(
       /\b(ACT|NSW|NT|QLD|SA|TAS|VIC|WA)\b/g,
       (match) => stateNames[match] ?? match,
     )
     .replace(/&/g, 'and')
+    .replace(/@/g, ' at ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function stripSpeechAsides(text: string): string {
+  return text
+    .replaceAll(callEndMarker, '')
+    .replace(/\(([^()]*)\)/g, (_match, content: string) =>
+      /^[\d\s+-]+$/.test(content.trim()) ? ` ${content.trim()} ` : ' ',
+    );
 }
 
 function formatTimeForSpeech(

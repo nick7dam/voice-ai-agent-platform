@@ -5,10 +5,12 @@ import {
   ToolDefinition,
 } from '../../common/types/tool.types';
 import { CalculateExpressionTool } from './tools/calculate-expression.tool';
+import { CaptureCustomerDetailsTool } from './tools/capture-customer-details.tool';
 import { CheckServiceAvailabilityTool } from './tools/check-service-availability.tool';
 import { CheckServiceHoursTool } from './tools/check-service-hours.tool';
 import { CreateServiceBookingTool } from './tools/create-service-booking.tool';
 import { GetServiceLocationTool } from './tools/get-service-location.tool';
+import { GetServiceTypesTool } from './tools/get-service-types.tool';
 import { GetCurrentTimeTool } from './tools/get-current-time.tool';
 import { ListMemoryTool } from './tools/list-memory.tool';
 import { RememberFactTool } from './tools/remember-fact.tool';
@@ -24,6 +26,8 @@ export class ToolRegistryService {
     listMemory: ListMemoryTool,
     checkServiceHours: CheckServiceHoursTool,
     getServiceLocation: GetServiceLocationTool,
+    getServiceTypes: GetServiceTypesTool,
+    captureCustomerDetails: CaptureCustomerDetailsTool,
     checkServiceAvailability: CheckServiceAvailabilityTool,
     createServiceBooking: CreateServiceBookingTool,
   ) {
@@ -34,6 +38,8 @@ export class ToolRegistryService {
       listMemory.definition,
       checkServiceHours.definition,
       getServiceLocation.definition,
+      getServiceTypes.definition,
+      captureCustomerDetails.definition,
       checkServiceAvailability.definition,
       createServiceBooking.definition,
     ];

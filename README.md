@@ -230,14 +230,27 @@ network candidates that cannot reach each other. Configure a TURN server that is
 reachable by both sides:
 
 ```bash
-WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+WEBRTC_ICE_TRANSPORT_POLICY=relay \
 NEST_WS_URL=ws://127.0.0.1:3000/realtime \
 pnpm local:voice:cuda
 ```
 
 The gateway sends that ICE config to the browser and uses the same config in
-`aiortc`. STUN alone is usually not enough for a cloud GPU behind NAT; TURN is
-the reliable path.
+`aiortc`. `WEBRTC_ICE_TRANSPORT_POLICY=relay` tells the browser to use TURN
+instead of first trying private host candidates. STUN alone is usually not
+enough for a cloud GPU behind NAT; TURN is the reliable path.
+
+The WebRTC gateway also owns the spoken call greeting:
+
+```bash
+VOICE_GATEWAY_GREETING_TEXT="Hi, this is Northside Auto Service's AI receptionist. How can I help you today?"
+```
+
+For receptionist tasks, the model can append the hidden `[[END_CALL]]` marker
+when the customer clearly finishes the call. The UI strips that marker, lets the
+final response play, and then closes the WebRTC session so a new call starts
+with **Start WebRTC voice**.
 
 ## Optional Groq Fallback
 

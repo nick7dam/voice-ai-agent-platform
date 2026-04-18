@@ -24,4 +24,27 @@ describe('normalizeTextForSpeech', () => {
       'Brunswick, Victoria and nearby suburbs',
     );
   });
+
+  it('expands common abbreviations for TTS', () => {
+    expect(
+      normalizeTextForSpeech('We can check brakes, e.g. pads, discs, etc.'),
+    ).toBe('We can check brakes, for example pads, discs, and so on.');
+    expect(normalizeTextForSpeech('i.e. bring the rego ASAP.')).toBe(
+      'that is bring the registration as soon as possible.',
+    );
+  });
+
+  it('removes assistant asides and hidden call markers from spoken text', () => {
+    expect(
+      normalizeTextForSpeech(
+        'Thanks, your booking is sorted. (End the call now.) [[END_CALL]]',
+      ),
+    ).toBe('Thanks, your booking is sorted.');
+  });
+
+  it('keeps numeric phone area codes inside parentheses', () => {
+    expect(normalizeTextForSpeech('Call us on (03) 9123 4567.')).toBe(
+      'Call us on 03 9123 4567.',
+    );
+  });
 });

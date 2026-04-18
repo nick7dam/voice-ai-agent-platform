@@ -72,6 +72,12 @@ const state = {
   mimeType: 'audio/wav',
   sampleRate: 48000,
   pendingDebugText: '',
+  latency: {
+    sttMs: null,
+    firstTokenMs: null,
+    firstTextMs: null,
+    firstAudioMs: null,
+  },
 };
 
 const el = {
@@ -102,6 +108,9 @@ const el = {
   endSession: document.querySelector('#endSession'),
   debugText: document.querySelector('#debugText'),
   status: document.querySelector('#status'),
+  latencyStt: document.querySelector('#latencyStt'),
+  latencyFirstToken: document.querySelector('#latencyFirstToken'),
+  latencyFirstAudio: document.querySelector('#latencyFirstAudio'),
   micLevel: document.querySelector('#micLevel'),
   webrtcAudio: document.querySelector('#webrtcAudio'),
   chatHistory: document.querySelector('#chatHistory'),
@@ -115,6 +124,41 @@ function setStatus(text) {
 
 function setTaskStatus(text) {
   el.taskStatus.textContent = text;
+}
+
+function formatLatency(value) {
+  return Number.isFinite(value) ? `${Math.round(value)} ms` : '--';
+}
+
+function updateLatencyMetrics(payload = {}) {
+  if (payload.sttMs !== null && payload.sttMs !== undefined) {
+    state.latency.sttMs = payload.sttMs;
+  }
+  if (payload.firstTokenMs !== null && payload.firstTokenMs !== undefined) {
+    state.latency.firstTokenMs = payload.firstTokenMs;
+  }
+  if (payload.firstTextMs !== null && payload.firstTextMs !== undefined) {
+    state.latency.firstTextMs = payload.firstTextMs;
+  }
+  if (payload.firstAudioMs !== null && payload.firstAudioMs !== undefined) {
+    state.latency.firstAudioMs = payload.firstAudioMs;
+  }
+
+  el.latencyStt.textContent = formatLatency(state.latency.sttMs);
+  el.latencyFirstToken.textContent = formatLatency(
+    state.latency.firstTokenMs ?? state.latency.firstTextMs,
+  );
+  el.latencyFirstAudio.textContent = formatLatency(state.latency.firstAudioMs);
+}
+
+function resetLatencyMetrics() {
+  state.latency = {
+    sttMs: null,
+    firstTokenMs: null,
+    firstTextMs: null,
+    firstAudioMs: null,
+  };
+  updateLatencyMetrics();
 }
 
 function linesToText(items) {
@@ -1312,11 +1356,18 @@ function handleWebRtcGatewayEvent(event) {
     state.sessionId = event.payload.sessionId;
     el.chatHistory.textContent = '';
     el.assistant.textContent = '';
+    resetLatencyMetrics();
     setStatus(`WebRTC session ${state.sessionId}`);
   }
 
   if (event.type === 'gateway.peer.state') {
     setStatus(`WebRTC ${event.payload.state}`);
+  }
+
+  if (event.type === 'gateway.greeting') {
+    appendChatMessage('assistant', event.payload.text || '');
+    el.assistant.textContent = event.payload.text || '';
+    setStatus('WebRTC greeting...');
   }
 
   if (event.type === 'gateway.speech.started') {
@@ -1328,7 +1379,16 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.transcription.started') {
+    resetLatencyMetrics();
     setStatus('WebRTC transcribing...');
+  }
+
+  if (event.type === 'reasoning.first_token') {
+    updateLatencyMetrics({ firstTokenMs: event.payload.latencyMs });
+  }
+
+  if (event.type === 'gateway.latency.updated') {
+    updateLatencyMetrics(event.payload);
   }
 
   if (event.type === 'gateway.transcription.empty') {
@@ -1358,6 +1418,18 @@ function handleWebRtcGatewayEvent(event) {
     setStatus('WebRTC listening...');
   }
 
+  if (event.type === 'session.end_requested') {
+    setStatus('Wrapping up the call...');
+  }
+
+  if (event.type === 'gateway.call.ended' || event.type === 'session.ended') {
+    setStatus('Call ended');
+    void stopWebRtcVoice({
+      notifyGateway: false,
+      statusText: 'Call ended. Start WebRTC voice to begin a new call.',
+    });
+  }
+
   if (event.type === 'session.interrupted') {
     setStatus('WebRTC interrupted');
   }
@@ -1379,6 +1451,12 @@ function handleWebRtcEnvelope(message) {
   }
 
   logClientEvent('webrtc.signaling', envelope);
+  if (envelope.type === 'call.ended') {
+    void stopWebRtcVoice({
+      notifyGateway: false,
+      statusText: 'Call ended. Start WebRTC voice to begin a new call.',
+    });
+  }
   return envelope;
 }
 
@@ -1503,6 +1581,7 @@ async function startWebRtcVoice() {
     iceServers: Array.isArray(gatewayReady.iceServers)
       ? gatewayReady.iceServers.length
       : 0,
+    iceTransportPolicy: gatewayReady.iceTransportPolicy || 'all',
   });
 
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -1536,6 +1615,8 @@ async function startWebRtcVoice() {
     iceServers: Array.isArray(gatewayReady.iceServers)
       ? gatewayReady.iceServers
       : [],
+    iceTransportPolicy:
+      gatewayReady.iceTransportPolicy === 'relay' ? 'relay' : 'all',
   });
   logWebRtcSetup('peer.created');
   state.webrtcPeerConnection = peerConnection;
@@ -1605,6 +1686,7 @@ async function startWebRtcVoice() {
 
 async function stopWebRtcVoice(options = {}) {
   const notifyGateway = options.notifyGateway !== false;
+  const statusText = options.statusText || 'WebRTC stopped';
 
   state.webrtcActive = false;
 
@@ -1632,7 +1714,7 @@ async function stopWebRtcVoice(options = {}) {
   state.webrtcSignalSocket = null;
 
   state.sessionId = null;
-  setStatus('WebRTC stopped');
+  setStatus(statusText);
   updateButtons();
 }
 
@@ -1692,6 +1774,7 @@ el.connect.addEventListener('click', () => {
       el.chatHistory.textContent = '';
       el.assistant.textContent = '';
       resetAssistantOutputState();
+      resetLatencyMetrics();
       setStatus(`Session ${state.sessionId}`);
     }
 
@@ -1706,6 +1789,10 @@ el.connect.addEventListener('click', () => {
       setStatus('Interrupted');
     }
 
+    if (event.type === 'session.end_requested') {
+      setStatus('Assistant marked the call complete');
+    }
+
     if (event.type === 'session.audio_output.updated') {
       state.audioPlaybackEnabled = event.payload.enabled;
       if (!state.audioPlaybackEnabled) {
@@ -1715,12 +1802,18 @@ el.connect.addEventListener('click', () => {
 
     if (event.type === 'transcript.final') {
       const transcript = event.payload.text || '';
+      resetLatencyMetrics();
+      updateLatencyMetrics({ sttMs: event.payload.latencyMs });
       if (transcript !== state.pendingDebugText) {
         appendChatMessage('user', transcript);
       }
       state.pendingDebugText = '';
       state.latestPartialTranscript = '';
       setStatus(`Heard: ${event.payload.text || '(empty)'}`);
+    }
+
+    if (event.type === 'reasoning.first_token') {
+      updateLatencyMetrics({ firstTokenMs: event.payload.latencyMs });
     }
 
     if (event.type === 'transcript.partial') {

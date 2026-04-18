@@ -163,10 +163,23 @@ host address and your laptop LAN address. Use a TURN server reachable by both
 sides:
 
 ```bash
-WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+WEBRTC_ICE_TRANSPORT_POLICY=relay \
 NEST_WS_URL=ws://127.0.0.1:3000/realtime \
 pnpm local:voice:cuda
 ```
 
 You can also set `WEBRTC_STUN_URLS`, `WEBRTC_TURN_URLS`,
 `WEBRTC_TURN_USERNAME`, and `WEBRTC_TURN_CREDENTIAL` instead of the JSON env.
+For remote GPU testing through Brev, TCP TURN plus
+`WEBRTC_ICE_TRANSPORT_POLICY=relay` avoids slow private-candidate attempts.
+
+The gateway speaks an opening line when the WebRTC peer connects. Override it
+with:
+
+```bash
+VOICE_GATEWAY_GREETING_TEXT="Hi, this is Northside Auto Service's AI receptionist. How can I help you today?"
+```
+
+If the assistant marks the call complete, the gateway waits for the final audio
+to finish and then closes the WebRTC session.
