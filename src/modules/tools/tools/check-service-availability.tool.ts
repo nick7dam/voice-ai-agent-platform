@@ -4,6 +4,7 @@ import { ToolDefinition } from '../../../common/types/tool.types';
 import {
   carServiceBusiness,
   nextAvailability,
+  serviceCatalog,
   serviceTypes,
 } from './car-service-data';
 
@@ -46,6 +47,7 @@ export class CheckServiceAvailabilityTool {
         businessName: carServiceBusiness.name,
         serviceType: input.serviceType ?? 'general service',
         supportedServices: serviceTypes,
+        serviceCatalog,
         slots: nextAvailability({
           date: input.date,
           preferredTimeOfDay: input.preferredTimeOfDay,
