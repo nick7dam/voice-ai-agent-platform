@@ -4,17 +4,21 @@ import {
   ToolDefinition,
   ToolExecutionContext,
 } from '../../../common/types/tool.types';
+import { validateAustralianPhoneNumber } from '../../../common/utils/phone-number';
 import { MemoryService } from '../../memory/memory.service';
 
+const optionalText = (max: number) =>
+  z.string().trim().min(1).max(max).optional();
+
 const schema = z.object({
-  customerName: z.string().min(1).max(120),
-  phone: z.string().min(5).max(40),
-  vehicle: z.string().min(1).max(160),
-  registration: z.string().min(1).max(24),
-  serviceType: z.string().min(1).max(120),
-  preferredDate: z.string().max(80),
-  preferredTime: z.string().max(40),
-  notes: z.string().max(300).optional(),
+  customerName: optionalText(120),
+  phone: optionalText(40),
+  vehicle: optionalText(160),
+  registration: optionalText(24),
+  serviceType: optionalText(120),
+  preferredDate: optionalText(80),
+  preferredTime: optionalText(40),
+  notes: optionalText(300),
 });
 
 @Injectable()
@@ -36,7 +40,8 @@ export class CaptureCustomerDetailsTool {
         },
         phone: {
           type: 'string',
-          description: 'Customer phone number.',
+          description:
+            'Customer Australian phone number. Only include it when clearly heard; otherwise ask the customer to repeat it.',
         },
         vehicle: {
           type: 'string',
@@ -65,7 +70,24 @@ export class CaptureCustomerDetailsTool {
       },
     },
     execute: (input, context: ToolExecutionContext) => {
-      const captured = Object.entries(input)
+      const phoneResult = input.phone
+        ? validateAustralianPhoneNumber(input.phone)
+        : undefined;
+      const normalizedInput = {
+        ...input,
+        phone: phoneResult?.ok ? phoneResult.display : undefined,
+      };
+      const invalidFields =
+        phoneResult && !phoneResult.ok
+          ? [
+              {
+                field: 'phone',
+                value: input.phone,
+                reason: phoneResult.reason,
+              },
+            ]
+          : [];
+      const captured = Object.entries(normalizedInput)
         .filter(([, value]) => typeof value === 'string' && value.trim())
         .map(([field, value]) => ({
           field,
@@ -75,10 +97,13 @@ export class CaptureCustomerDetailsTool {
       if (captured.length === 0) {
         return Promise.resolve({
           capturedFields: [],
+          invalidFields,
           bookingReady: false,
-          missingForBooking: this.missingForBooking(input),
+          missingForBooking: this.missingForBooking(normalizedInput),
           instruction:
-            'No customer details were supplied. Ask one short question for the next required booking detail.',
+            invalidFields.length > 0
+              ? 'The phone number was invalid or incomplete. Ask the customer to repeat it digit by digit.'
+              : 'No customer details were supplied. Ask one short question for the next required booking detail.',
         });
       }
 
@@ -90,15 +115,18 @@ export class CaptureCustomerDetailsTool {
         );
       }
 
-      const missingForBooking = this.missingForBooking(input);
+      const missingForBooking = this.missingForBooking(normalizedInput);
       return Promise.resolve({
         capturedFields: captured,
+        invalidFields,
         bookingReady: missingForBooking.length === 0,
         missingForBooking,
         instruction:
-          missingForBooking.length === 0
-            ? 'The details needed for a provisional booking are available. Check availability before creating the booking.'
-            : 'Acknowledge the captured detail briefly, then ask one short question for the next missing booking detail.',
+          invalidFields.length > 0
+            ? 'Acknowledge any captured details briefly, then ask the customer to repeat the phone number digit by digit.'
+            : missingForBooking.length === 0
+              ? 'The details needed for a provisional booking are available. Check availability before creating the booking.'
+              : 'Acknowledge the captured detail briefly, then ask one short question for the next missing booking detail.',
       });
     },
   };

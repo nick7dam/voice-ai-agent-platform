@@ -111,7 +111,7 @@ export class OrchestratorService {
         });
       };
       const emitSpeechTextChunk = (text: string, final: boolean) => {
-        const speech = text.replace(/\s+/g, ' ').trim();
+        const speech = this.sanitizeAssistantPlainText(text);
 
         if (!speech) {
           return;
@@ -424,7 +424,7 @@ export class OrchestratorService {
       {
         role: 'user',
         content:
-          'Use the tool results above to answer the user. Return only the final user-facing plain text response.',
+          'Use the tool results above to answer the user. If a tool reports invalid or missing customer details, ask one short question for only that information. Return only the final user-facing plain text response.',
       },
     ];
   }
@@ -432,11 +432,13 @@ export class OrchestratorService {
   private normalizeAssistantText(text: string, task: TaskConfig): string {
     const fallback = 'Done.';
     const compact =
-      (text || fallback)
-        .replaceAll(this.callEndMarker, '')
-        .replace(/\r/g, '')
-        .trim() || fallback;
-    return compact.slice(0, task.responsePolicy.maxResponseChars);
+      this.sanitizeAssistantPlainText(
+        (text || fallback).replaceAll(this.callEndMarker, ''),
+      ) || fallback;
+    return this.limitResponseForPhoneCall(
+      compact,
+      task.responsePolicy.maxResponseChars,
+    );
   }
 
   private shouldEndCall(text: string): boolean {
@@ -447,6 +449,43 @@ export class OrchestratorService {
     return /\b(bye|goodbye|that'?s all|that is all|nothing else|no thanks|no thank you|all good|end the call|hang up)\b/i.test(
       text,
     );
+  }
+
+  private sanitizeAssistantPlainText(text: string): string {
+    return text
+      .replace(/\r/g, '')
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]*)`/g, '$1')
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/\*([^*]+)\*/g, '$1')
+      .replace(
+        /\b(?:I am|I'm) (?:using|calling) (?:a )?(?:tool|function)[^.?!]*[.?!]?/gi,
+        "I'll check that.",
+      )
+      .replace(
+        /\b(?:tool|schema|prompt|websocket|memory store|validation error)\b/gi,
+        '',
+      )
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private limitResponseForPhoneCall(text: string, maxChars: number): string {
+    const clipped = text.slice(0, maxChars).trim();
+    const sentences = clipped.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [clipped];
+
+    if (sentences.length <= 2) {
+      return clipped;
+    }
+
+    const questionIndex = sentences.findIndex(
+      (sentence, index) => index < 3 && sentence.includes('?'),
+    );
+    const keepCount =
+      questionIndex >= 0 ? questionIndex + 1 : clipped.length <= 260 ? 3 : 2;
+    return sentences.slice(0, keepCount).join(' ').replace(/\s+/g, ' ').trim();
   }
 
   private shouldUseTools(transcript: string): boolean {

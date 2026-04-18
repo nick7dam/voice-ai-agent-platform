@@ -30,6 +30,13 @@ const state = {
   webrtcDataChannel: null,
   webrtcLocalStream: null,
   webrtcRemoteStream: null,
+  webrtcBargeInContext: null,
+  webrtcBargeInSource: null,
+  webrtcBargeInAnalyser: null,
+  webrtcBargeInFrame: null,
+  webrtcBargeInLastAt: 0,
+  webrtcBargeInCandidateMs: 0,
+  webrtcBargeInMutedCandidate: false,
   webrtcDisconnectTimer: null,
   webrtcMuteTimer: null,
   webrtcActive: false,
@@ -398,13 +405,13 @@ async function sendPartialAudioBlob(blob, sequence, mimeType = state.mimeType) {
   });
 }
 
-function getMicLevel() {
-  if (!state.analyser) {
+function getAnalyserLevel(analyser) {
+  if (!analyser) {
     return 0;
   }
 
-  const samples = new Uint8Array(state.analyser.fftSize);
-  state.analyser.getByteTimeDomainData(samples);
+  const samples = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(samples);
 
   let sum = 0;
   for (const sample of samples) {
@@ -413,6 +420,10 @@ function getMicLevel() {
   }
 
   return Math.sqrt(sum / samples.length);
+}
+
+function getMicLevel() {
+  return getAnalyserLevel(state.analyser);
 }
 
 function updateMicMeter(level) {
@@ -1360,13 +1371,25 @@ function clearWebRtcDisconnectTimer() {
   state.webrtcDisconnectTimer = null;
 }
 
+function setWebRtcRemoteAudioEnabled(enabled) {
+  state.webrtcRemoteStream
+    ?.getAudioTracks()
+    .forEach((track) => {
+      track.enabled = enabled;
+    });
+}
+
 function unmuteWebRtcAudio() {
   if (state.webrtcMuteTimer) {
     window.clearTimeout(state.webrtcMuteTimer);
     state.webrtcMuteTimer = null;
   }
 
+  setWebRtcRemoteAudioEnabled(true);
   el.webrtcAudio.muted = false;
+  if (el.webrtcAudio.srcObject) {
+    void el.webrtcAudio.play().catch(() => undefined);
+  }
 }
 
 function muteWebRtcAudioUntilNextAssistant() {
@@ -1375,7 +1398,138 @@ function muteWebRtcAudioUntilNextAssistant() {
     state.webrtcMuteTimer = null;
   }
 
+  setWebRtcRemoteAudioEnabled(false);
   el.webrtcAudio.muted = true;
+  el.webrtcAudio.pause();
+}
+
+function sendWebRtcInterrupt(reason, turnId) {
+  if (turnId && state.interruptSentForTurnIds.has(turnId)) {
+    return true;
+  }
+
+  const message = JSON.stringify({ type: 'interrupt', reason });
+
+  if (state.webrtcDataChannel?.readyState === 'open') {
+    state.webrtcDataChannel.send(message);
+  } else if (state.webrtcSignalSocket?.readyState === WebSocket.OPEN) {
+    state.webrtcSignalSocket.send(message);
+  } else {
+    return false;
+  }
+
+  if (turnId) {
+    state.interruptSentForTurnIds.add(turnId);
+  }
+
+  logClientEvent('client.webrtc.interrupt.sent', { reason, turnId });
+  return true;
+}
+
+function clearWebRtcAssistantPlayback() {
+  const turnId = getCurrentAssistantTurnId();
+  markAssistantAudioCancelled(turnId);
+  state.assistantBusy = false;
+  state.assistantAudioActive = false;
+  state.assistantAudioTurnId = null;
+  muteWebRtcAudioUntilNextAssistant();
+  return turnId;
+}
+
+function interruptWebRtcAssistantOutput(reason) {
+  if (!state.webrtcActive || !hasInterruptibleAssistantOutput()) {
+    return false;
+  }
+
+  const turnId = clearWebRtcAssistantPlayback();
+  return sendWebRtcInterrupt(reason, turnId);
+}
+
+function runWebRtcBargeInLoop() {
+  if (!state.webrtcActive || !state.webrtcBargeInAnalyser) {
+    return;
+  }
+
+  const level = getAnalyserLevel(state.webrtcBargeInAnalyser);
+  const now = performance.now();
+  const deltaMs = state.webrtcBargeInLastAt
+    ? Math.min(100, Math.max(0, now - state.webrtcBargeInLastAt))
+    : 16;
+  const threshold = getSpeechThreshold();
+  const assistantOutputActive = hasInterruptibleAssistantOutput();
+  state.webrtcBargeInLastAt = now;
+
+  updateMicMeter(level);
+
+  if (!assistantOutputActive) {
+    updateNoiseFloor(level);
+    state.webrtcBargeInCandidateMs = 0;
+    state.webrtcBargeInMutedCandidate = false;
+    state.webrtcBargeInFrame = requestAnimationFrame(runWebRtcBargeInLoop);
+    return;
+  }
+
+  if (isLikelyBargeIn(level, threshold)) {
+    state.webrtcBargeInCandidateMs += deltaMs;
+
+    if (
+      state.webrtcBargeInCandidateMs >= 60 &&
+      !state.webrtcBargeInMutedCandidate
+    ) {
+      muteWebRtcAudioUntilNextAssistant();
+      state.webrtcBargeInMutedCandidate = true;
+    }
+
+    if (state.webrtcBargeInCandidateMs >= 120) {
+      interruptWebRtcAssistantOutput('client_local_barge_in');
+      state.webrtcBargeInCandidateMs = 0;
+    }
+  } else {
+    if (state.webrtcBargeInMutedCandidate) {
+      unmuteWebRtcAudio();
+    }
+    state.webrtcBargeInCandidateMs = 0;
+    state.webrtcBargeInMutedCandidate = false;
+  }
+
+  state.webrtcBargeInFrame = requestAnimationFrame(runWebRtcBargeInLoop);
+}
+
+async function startWebRtcBargeInMonitor(localStream) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const context = new AudioContextClass({ latencyHint: 'interactive' });
+  const source = context.createMediaStreamSource(localStream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+
+  state.webrtcBargeInContext = context;
+  state.webrtcBargeInSource = source;
+  state.webrtcBargeInAnalyser = analyser;
+  state.webrtcBargeInLastAt = 0;
+  state.webrtcBargeInCandidateMs = 0;
+  state.webrtcBargeInMutedCandidate = false;
+  runWebRtcBargeInLoop();
+}
+
+async function stopWebRtcBargeInMonitor() {
+  if (state.webrtcBargeInFrame) {
+    cancelAnimationFrame(state.webrtcBargeInFrame);
+    state.webrtcBargeInFrame = null;
+  }
+
+  state.webrtcBargeInSource?.disconnect();
+  state.webrtcBargeInSource = null;
+  state.webrtcBargeInAnalyser = null;
+  state.webrtcBargeInCandidateMs = 0;
+  state.webrtcBargeInMutedCandidate = false;
+
+  if (state.webrtcBargeInContext) {
+    await state.webrtcBargeInContext.close();
+    state.webrtcBargeInContext = null;
+  }
+
+  updateMicMeter(0);
 }
 
 function handleWebRtcGatewayEvent(event) {
@@ -1400,6 +1554,9 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.speech.started') {
+    if (event.payload?.startedDuringAssistant) {
+      clearWebRtcAssistantPlayback();
+    }
     setStatus('WebRTC heard speech');
   }
 
@@ -1410,6 +1567,12 @@ function handleWebRtcGatewayEvent(event) {
   if (event.type === 'gateway.transcription.started') {
     resetLatencyMetrics();
     setStatus('WebRTC transcribing...');
+  }
+
+  if (event.type === 'reasoning.started') {
+    state.assistantBusy = true;
+    state.lastAssistantTurnId = event.payload.turnId;
+    setStatus('WebRTC thinking...');
   }
 
   if (event.type === 'reasoning.first_token') {
@@ -1425,15 +1588,23 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.tts.started') {
+    state.assistantAudioActive = true;
+    state.assistantAudioTurnId = event.payload.turnId;
+    markAssistantAudioActivity(event.payload.turnId);
     unmuteWebRtcAudio();
     setStatus('WebRTC speaking...');
   }
 
   if (event.type === 'gateway.tts.ended') {
+    state.assistantAudioActive = false;
+    state.assistantAudioTurnId = null;
     setStatus('WebRTC listening...');
   }
 
   if (event.type === 'gateway.audio.cleared') {
+    state.assistantBusy = false;
+    state.assistantAudioActive = false;
+    state.assistantAudioTurnId = null;
     muteWebRtcAudioUntilNextAssistant();
     setStatus('WebRTC interrupted');
   }
@@ -1444,6 +1615,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'assistant.response') {
+    state.assistantBusy = false;
     appendChatMessage('assistant', event.payload.text || '');
     el.assistant.textContent = event.payload.text || '';
     setStatus('WebRTC listening...');
@@ -1462,6 +1634,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'session.interrupted') {
+    clearWebRtcAssistantPlayback();
     setStatus('WebRTC interrupted');
   }
 
@@ -1527,6 +1700,8 @@ async function startWebRtcVoice() {
   }
 
   state.webrtcActive = true;
+  state.interruptSentForTurnIds.clear();
+  state.cancelledAudioTurnIds.clear();
   setStatus('Connecting WebRTC gateway...');
   updateButtons();
 
@@ -1641,6 +1816,8 @@ async function startWebRtcVoice() {
     tracks: localStream.getAudioTracks().length,
   });
   state.webrtcLocalStream = localStream;
+  await startWebRtcBargeInMonitor(localStream);
+  logWebRtcSetup('local_barge_in_monitor.ready');
 
   const peerConnection = new RTCPeerConnection({
     iceServers: Array.isArray(gatewayReady.iceServers)
@@ -1735,6 +1912,7 @@ async function stopWebRtcVoice(options = {}) {
 
   state.webrtcActive = false;
   clearWebRtcDisconnectTimer();
+  await stopWebRtcBargeInMonitor();
   unmuteWebRtcAudio();
 
   if (

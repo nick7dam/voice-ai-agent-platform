@@ -4,6 +4,7 @@ import {
   ToolDefinition,
   ToolExecutionContext,
 } from '../../../common/types/tool.types';
+import { validateAustralianPhoneNumber } from '../../../common/utils/phone-number';
 import { MemoryService } from '../../memory/memory.service';
 import {
   carServiceBusiness,
@@ -65,16 +66,36 @@ export class CreateServiceBookingTool {
       },
     },
     execute: (input, context: ToolExecutionContext) => {
-      const missingFields = this.missingRequiredFields(input);
+      const phoneResult = input.phone
+        ? validateAustralianPhoneNumber(input.phone)
+        : undefined;
+      const normalizedInput = {
+        ...input,
+        phone: phoneResult?.ok ? phoneResult.display : undefined,
+      };
+      const invalidFields =
+        phoneResult && !phoneResult.ok
+          ? [
+              {
+                field: 'phone',
+                value: input.phone,
+                reason: phoneResult.reason,
+              },
+            ]
+          : [];
+      const missingFields = this.missingRequiredFields(normalizedInput);
 
-      if (missingFields.length > 0) {
+      if (missingFields.length > 0 || invalidFields.length > 0) {
         return Promise.resolve({
           bookingCreated: false,
           missingFields,
+          invalidFields,
           supportedServices: serviceTypes,
           suggestedSlots: nextAvailability({ limit: 3 }),
           instruction:
-            'Ask the customer for the missing fields before creating the booking.',
+            invalidFields.length > 0
+              ? 'The phone number is invalid or incomplete. Ask the customer to repeat it digit by digit before creating the booking.'
+              : 'Ask the customer for the missing fields before creating the booking.',
         });
       }
 
@@ -83,13 +104,13 @@ export class CreateServiceBookingTool {
         bookingCreated: true,
         bookingReference,
         businessName: carServiceBusiness.name,
-        customerName: input.customerName,
-        phone: input.phone,
-        vehicle: input.vehicle,
-        serviceType: input.serviceType,
-        preferredDate: input.preferredDate,
-        preferredTime: input.preferredTime,
-        notes: input.notes ?? null,
+        customerName: normalizedInput.customerName,
+        phone: normalizedInput.phone,
+        vehicle: normalizedInput.vehicle,
+        serviceType: normalizedInput.serviceType,
+        preferredDate: normalizedInput.preferredDate,
+        preferredTime: normalizedInput.preferredTime,
+        notes: normalizedInput.notes ?? null,
         status: 'provisional',
         instruction:
           'Tell the customer this is provisionally booked and the workshop can confirm if needed.',
@@ -97,7 +118,7 @@ export class CreateServiceBookingTool {
 
       this.memory.rememberFact(
         context.sessionId,
-        `Provisional booking ${bookingReference}: ${input.customerName}, ${input.vehicle}, ${input.serviceType}, ${input.preferredDate} at ${input.preferredTime}. Phone ${input.phone}.`,
+        `Provisional booking ${bookingReference}: ${normalizedInput.customerName}, ${normalizedInput.vehicle}, ${normalizedInput.serviceType}, ${normalizedInput.preferredDate} at ${normalizedInput.preferredTime}. Phone ${normalizedInput.phone}.`,
         'booking',
       );
 

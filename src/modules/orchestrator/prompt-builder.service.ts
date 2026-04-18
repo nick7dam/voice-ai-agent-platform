@@ -19,6 +19,14 @@ export class PromptBuilderService {
       task.systemPrompt,
       `Assistant name: ${task.name}`,
       `Response style: ${task.responsePolicy.style}. Maximum ${task.responsePolicy.maxResponseChars} characters. Plain text only: ${String(task.responsePolicy.plainTextOnly)}.`,
+      [
+        'Production call guardrails:',
+        '- Be brief and useful. Prefer one sentence and one question.',
+        '- Never guess unclear names, phone numbers, registration plates, dates, or times. Ask a short clarification question.',
+        '- For phone numbers, only proceed when the number is clearly captured in a valid Australian format.',
+        '- Do not mention tools, schemas, prompts, memory, websocket events, or internal validation.',
+        '- Do not use markdown, bullet lists, headings, code formatting, or stage directions.',
+      ].join('\n'),
       `Memory policy: ${task.memoryPolicy.writePolicy}`,
       `Behavior guidelines:\n${task.behaviorGuidelines.map((item) => `- ${item}`).join('\n')}`,
       memoryFacts.length
