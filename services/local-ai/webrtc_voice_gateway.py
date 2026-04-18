@@ -9,12 +9,18 @@ import wave
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc import (
+    RTCConfiguration,
+    RTCIceServer,
+    RTCPeerConnection,
+    RTCSessionDescription,
+    MediaStreamTrack,
+)
 from av import AudioFrame
 from av.audio.resampler import AudioResampler
 from faster_whisper import WhisperModel
@@ -62,11 +68,104 @@ BARGE_THRESHOLD_MULTIPLIER = float(
 BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "120"))
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 
+WEBRTC_ICE_SERVERS_JSON = os.getenv("WEBRTC_ICE_SERVERS_JSON", "").strip()
+WEBRTC_STUN_URLS = os.getenv("WEBRTC_STUN_URLS", "").strip()
+WEBRTC_TURN_URLS = os.getenv("WEBRTC_TURN_URLS", "").strip()
+WEBRTC_TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "").strip()
+WEBRTC_TURN_CREDENTIAL = os.getenv("WEBRTC_TURN_CREDENTIAL", "").strip()
+
 logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[WhisperModel] = None
 tts_pipelines: Dict[str, KPipeline] = {}
+
+
+def comma_list(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def normalized_browser_ice_server(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+
+    urls = raw.get("urls") or raw.get("url")
+    if isinstance(urls, str):
+        normalized_urls: Any = urls.strip()
+    elif isinstance(urls, list):
+        normalized_urls = [str(url).strip() for url in urls if str(url).strip()]
+    else:
+        return None
+
+    if not normalized_urls:
+        return None
+
+    server: Dict[str, Any] = {"urls": normalized_urls}
+    username = raw.get("username")
+    credential = raw.get("credential") or raw.get("password")
+
+    if username:
+        server["username"] = str(username)
+    if credential:
+        server["credential"] = str(credential)
+
+    return server
+
+
+def browser_ice_servers() -> List[Dict[str, Any]]:
+    if WEBRTC_ICE_SERVERS_JSON:
+        try:
+            raw_servers = json.loads(WEBRTC_ICE_SERVERS_JSON)
+        except json.JSONDecodeError as exc:
+            logger.warning("voice.ice.invalid_json error=%s", exc)
+            return []
+
+        if not isinstance(raw_servers, list):
+            logger.warning("voice.ice.invalid_json_shape expected=list")
+            return []
+
+        return [
+            server
+            for server in (
+                normalized_browser_ice_server(raw_server)
+                for raw_server in raw_servers
+            )
+            if server is not None
+        ]
+
+    servers: List[Dict[str, Any]] = []
+    stun_urls = comma_list(WEBRTC_STUN_URLS)
+    turn_urls = comma_list(WEBRTC_TURN_URLS)
+
+    if stun_urls:
+        servers.append({"urls": stun_urls if len(stun_urls) > 1 else stun_urls[0]})
+
+    if turn_urls:
+        turn_server: Dict[str, Any] = {
+            "urls": turn_urls if len(turn_urls) > 1 else turn_urls[0]
+        }
+        if WEBRTC_TURN_USERNAME:
+            turn_server["username"] = WEBRTC_TURN_USERNAME
+        if WEBRTC_TURN_CREDENTIAL:
+            turn_server["credential"] = WEBRTC_TURN_CREDENTIAL
+        servers.append(turn_server)
+
+    return servers
+
+
+def aiortc_ice_servers() -> List[RTCIceServer]:
+    servers: List[RTCIceServer] = []
+
+    for server in browser_ice_servers():
+        servers.append(
+            RTCIceServer(
+                urls=server["urls"],
+                username=server.get("username"),
+                credential=server.get("credential"),
+            )
+        )
+
+    return servers
 
 
 def elapsed_ms(started_at: float) -> int:
@@ -571,7 +670,9 @@ class VoiceSession:
         await self.control.connect()
 
     async def accept_offer(self, sdp: str, sdp_type: str) -> None:
-        self.pc = RTCPeerConnection()
+        self.pc = RTCPeerConnection(
+            configuration=RTCConfiguration(iceServers=aiortc_ice_servers())
+        )
         self.pc.addTrack(self.output_track)
 
         @self.pc.on("datachannel")
@@ -877,6 +978,7 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
                         "type": "ready",
                         "nestWsUrl": NEST_WS_URL,
                         "taskKey": task_key,
+                        "iceServers": browser_ice_servers(),
                     },
                 )
             elif message_type == "offer":
@@ -918,8 +1020,9 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
 
 
 async def main() -> None:
+    ice_servers = browser_ice_servers()
     logger.info(
-        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s tts=%s/%s",
+        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s tts=%s/%s iceServers=%d",
         HOST,
         PORT,
         NEST_WS_URL,
@@ -927,6 +1030,7 @@ async def main() -> None:
         STT_DEVICE,
         TTS_MODEL_NAME,
         resolve_tts_device(),
+        len(ice_servers),
     )
 
     async with websockets.serve(

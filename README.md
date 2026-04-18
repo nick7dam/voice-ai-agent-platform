@@ -224,6 +224,21 @@ reachable ICE candidates. In practice that means exposing the gateway port and,
 for many cloud/NAT setups, adding a TURN server. SSH port-forwarding only the
 HTTP UI port is usually not enough for WebRTC media.
 
+For Brev or another remote GPU reached through SSH port forwarding, signaling can
+connect while media still fails because the browser and GPU advertise private
+network candidates that cannot reach each other. Configure a TURN server that is
+reachable by both sides:
+
+```bash
+WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+NEST_WS_URL=ws://127.0.0.1:3000/realtime \
+pnpm local:voice:cuda
+```
+
+The gateway sends that ICE config to the browser and uses the same config in
+`aiortc`. STUN alone is usually not enough for a cloud GPU behind NAT; TURN is
+the reliable path.
+
 ## Optional Groq Fallback
 
 Groq providers are still available by changing env vars:

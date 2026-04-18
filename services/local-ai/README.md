@@ -155,3 +155,18 @@ The gateway listens on `VOICE_GATEWAY_PORT` (`8004` by default). The browser
 uses a WebSocket only for WebRTC signaling; STT and TTS run in-process inside
 `webrtc_voice_gateway.py`, so you should no longer see `/transcribe` or
 `/synthesize` requests for WebRTC voice sessions.
+
+When the browser is on your laptop and the gateway is on a Brev/cloud GPU, SSH
+port forwarding is not enough for WebRTC media. It forwards the signaling
+WebSocket, but ICE still tries to connect private UDP candidates such as the GPU
+host address and your laptop LAN address. Use a TURN server reachable by both
+sides:
+
+```bash
+WEBRTC_ICE_SERVERS_JSON='[{"urls":["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"],"username":"voice","credential":"change-me"}]' \
+NEST_WS_URL=ws://127.0.0.1:3000/realtime \
+pnpm local:voice:cuda
+```
+
+You can also set `WEBRTC_STUN_URLS`, `WEBRTC_TURN_URLS`,
+`WEBRTC_TURN_USERNAME`, and `WEBRTC_TURN_CREDENTIAL` instead of the JSON env.

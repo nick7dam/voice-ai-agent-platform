@@ -1466,7 +1466,7 @@ async function startWebRtcVoice() {
       taskKey: el.taskKey.value.trim() || 'general_voice_assistant',
     }),
   );
-  await readyWait;
+  const gatewayReady = await readyWait;
 
   const localStream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -1478,7 +1478,11 @@ async function startWebRtcVoice() {
   });
   state.webrtcLocalStream = localStream;
 
-  const peerConnection = new RTCPeerConnection();
+  const peerConnection = new RTCPeerConnection({
+    iceServers: Array.isArray(gatewayReady.iceServers)
+      ? gatewayReady.iceServers
+      : [],
+  });
   state.webrtcPeerConnection = peerConnection;
 
   const dataChannel = peerConnection.createDataChannel('events');
