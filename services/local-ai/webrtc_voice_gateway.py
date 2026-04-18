@@ -485,6 +485,7 @@ class NestControlClient:
         self.receiver_task: Optional[asyncio.Task[None]] = None
 
     async def connect(self) -> None:
+        logger.info("voice.nest.connect url=%s", NEST_WS_URL)
         self.ws = await websockets.connect(NEST_WS_URL, max_size=8 * 1024 * 1024)
         self.receiver_task = asyncio.create_task(self.receive_loop())
         await self.send(
@@ -498,6 +499,7 @@ class NestControlClient:
         )
         await asyncio.wait_for(self.ready.wait(), timeout=10)
         await self.send({"type": "session.audio_output", "payload": {"enabled": False}})
+        logger.info("voice.nest.ready")
 
     async def send_text(self, text: str) -> None:
         await self.ready.wait()
@@ -842,16 +844,33 @@ async def send_json(websocket: Any, payload: Dict[str, Any]) -> None:
 
 async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
     session = VoiceSession(websocket)
-    logger.info("voice.signaling.connected")
+    remote = getattr(websocket, "remote_address", None)
+    logger.info("voice.signaling.connected remote=%s", remote)
 
     try:
         async for raw in websocket:
             message = json.loads(raw)
             message_type = message.get("type")
+            logger.info("voice.signaling.message type=%s", message_type)
 
             if message_type == "start":
                 task_key = message.get("taskKey") or DEFAULT_TASK_KEY
-                await session.start_control(task_key)
+                try:
+                    await session.start_control(task_key)
+                except Exception as exc:
+                    logger.exception("voice.nest.connect_failed url=%s", NEST_WS_URL)
+                    await send_json(
+                        websocket,
+                        {
+                            "type": "error",
+                            "code": "NEST_WS_CONNECTION_FAILED",
+                            "message": (
+                                f"Could not connect voice gateway to Nest at {NEST_WS_URL}: {exc}"
+                            ),
+                        },
+                    )
+                    continue
+
                 await send_json(
                     websocket,
                     {
@@ -861,13 +880,25 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
                     },
                 )
             elif message_type == "offer":
-                await session.accept_offer(
-                    sdp=message["sdp"],
-                    sdp_type=message.get("sdpType", "offer"),
-                )
+                try:
+                    await session.accept_offer(
+                        sdp=message["sdp"],
+                        sdp_type=message.get("sdpType", "offer"),
+                    )
+                except Exception as exc:
+                    logger.exception("voice.webrtc.offer_failed")
+                    await send_json(
+                        websocket,
+                        {
+                            "type": "error",
+                            "code": "WEBRTC_OFFER_FAILED",
+                            "message": f"Could not accept WebRTC offer: {exc}",
+                        },
+                    )
             elif message_type == "interrupt":
                 await session.interrupt_assistant("signaling_interrupt")
             elif message_type == "stop":
+                logger.info("voice.signaling.stop")
                 break
     except Exception as exc:
         logger.exception("voice.signaling.error error=%s", exc)

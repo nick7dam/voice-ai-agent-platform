@@ -1395,12 +1395,24 @@ async function startWebRtcVoice() {
   state.webrtcSignalSocket = signalSocket;
 
   let readyResolve;
+  let readyReject;
   let answerResolve;
-  const readyPromise = new Promise((resolve) => {
+  let answerReject;
+  const readyWait = new Promise((resolve, reject) => {
     readyResolve = resolve;
+    readyReject = reject;
+    window.setTimeout(
+      () => reject(new Error('Timed out waiting for WebRTC gateway ready.')),
+      10000,
+    );
   });
-  const answerPromise = new Promise((resolve) => {
+  const answerWait = new Promise((resolve, reject) => {
     answerResolve = resolve;
+    answerReject = reject;
+    window.setTimeout(
+      () => reject(new Error('Timed out waiting for WebRTC answer.')),
+      10000,
+    );
   });
 
   signalSocket.addEventListener('message', (message) => {
@@ -1415,12 +1427,30 @@ async function startWebRtcVoice() {
     }
 
     if (envelope.type === 'error') {
-      setStatus(`WebRTC gateway error: ${envelope.message}`);
+      const message = envelope.message || 'WebRTC gateway error';
+      setStatus(`WebRTC gateway error: ${message}`);
+      readyReject?.(new Error(message));
+      answerReject?.(new Error(message));
     }
   });
 
-  signalSocket.addEventListener('close', () => {
+  signalSocket.addEventListener('close', (event) => {
+    const reason = event.reason
+      ? ` ${event.reason}`
+      : event.wasClean
+        ? ''
+        : ' unexpectedly';
+    const message = `WebRTC signaling closed${reason} code=${event.code}`;
+    logClientEvent('webrtc.signaling.closed', {
+      code: event.code,
+      reason: event.reason,
+      wasClean: event.wasClean,
+    });
+    readyReject?.(new Error(message));
+    answerReject?.(new Error(message));
+
     if (state.webrtcActive) {
+      setStatus(message);
       void stopWebRtcVoice({ notifyGateway: false });
     }
   });
@@ -1436,7 +1466,7 @@ async function startWebRtcVoice() {
       taskKey: el.taskKey.value.trim() || 'general_voice_assistant',
     }),
   );
-  await readyPromise;
+  await readyWait;
 
   const localStream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -1493,7 +1523,7 @@ async function startWebRtcVoice() {
     }),
   );
 
-  const answer = await answerPromise;
+  const answer = await answerWait;
   await peerConnection.setRemoteDescription(
     new RTCSessionDescription({
       type: answer.sdpType,
