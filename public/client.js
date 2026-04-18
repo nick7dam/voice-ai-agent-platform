@@ -1382,6 +1382,36 @@ function handleWebRtcEnvelope(message) {
   return envelope;
 }
 
+function logWebRtcSetup(step, payload = {}) {
+  logClientEvent('webrtc.setup', { step, ...payload });
+}
+
+function getWebRtcErrorMessage(error, fallback) {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+
+  if (
+    error.name === 'NotAllowedError' ||
+    error.name === 'PermissionDeniedError'
+  ) {
+    return 'Microphone permission was denied. Allow mic access and start WebRTC voice again.';
+  }
+
+  if (
+    error.name === 'NotFoundError' ||
+    error.name === 'DevicesNotFoundError'
+  ) {
+    return 'No microphone was found by the browser.';
+  }
+
+  if (error.name === 'NotReadableError') {
+    return 'The browser could not read the microphone. Another app may be using it.';
+  }
+
+  return error.message || fallback;
+}
+
 async function startWebRtcVoice() {
   if (state.webrtcActive) {
     return;
@@ -1459,6 +1489,7 @@ async function startWebRtcVoice() {
     signalSocket.addEventListener('open', resolve, { once: true });
     signalSocket.addEventListener('error', reject, { once: true });
   });
+  logWebRtcSetup('signaling.open', { url: el.webrtcUrl.value.trim() });
 
   signalSocket.send(
     JSON.stringify({
@@ -1466,15 +1497,38 @@ async function startWebRtcVoice() {
       taskKey: el.taskKey.value.trim() || 'general_voice_assistant',
     }),
   );
+  logWebRtcSetup('session.start.sent');
   const gatewayReady = await readyWait;
+  logWebRtcSetup('gateway.ready', {
+    iceServers: Array.isArray(gatewayReady.iceServers)
+      ? gatewayReady.iceServers.length
+      : 0,
+  });
 
-  const localStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      channelCount: 1,
-    },
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(
+      'Browser microphone access is unavailable. Open the UI through http://127.0.0.1:3000, localhost, or HTTPS.',
+    );
+  }
+
+  let localStream;
+  try {
+    logWebRtcSetup('microphone.requested');
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+    });
+  } catch (error) {
+    throw new Error(
+      getWebRtcErrorMessage(error, 'Could not access the microphone.'),
+    );
+  }
+  logWebRtcSetup('microphone.ready', {
+    tracks: localStream.getAudioTracks().length,
   });
   state.webrtcLocalStream = localStream;
 
@@ -1483,6 +1537,7 @@ async function startWebRtcVoice() {
       ? gatewayReady.iceServers
       : [],
   });
+  logWebRtcSetup('peer.created');
   state.webrtcPeerConnection = peerConnection;
 
   const dataChannel = peerConnection.createDataChannel('events');
@@ -1514,10 +1569,16 @@ async function startWebRtcVoice() {
   for (const track of localStream.getTracks()) {
     peerConnection.addTrack(track, localStream);
   }
+  logWebRtcSetup('tracks.added', { tracks: localStream.getTracks().length });
 
   const offer = await peerConnection.createOffer();
+  logWebRtcSetup('offer.created');
   await peerConnection.setLocalDescription(offer);
+  logWebRtcSetup('local_description.set');
   await waitForIceGatheringComplete(peerConnection);
+  logWebRtcSetup('ice_gathering.done', {
+    state: peerConnection.iceGatheringState,
+  });
 
   signalSocket.send(
     JSON.stringify({
@@ -1526,14 +1587,17 @@ async function startWebRtcVoice() {
       sdpType: peerConnection.localDescription.type,
     }),
   );
+  logWebRtcSetup('offer.sent');
 
   const answer = await answerWait;
+  logWebRtcSetup('answer.received');
   await peerConnection.setRemoteDescription(
     new RTCSessionDescription({
       type: answer.sdpType,
       sdp: answer.sdp,
     }),
   );
+  logWebRtcSetup('remote_description.set');
 
   setStatus('WebRTC listening...');
   updateButtons();
@@ -1778,6 +1842,11 @@ el.stopLive.addEventListener('click', () => {
 
 el.startWebrtc.addEventListener('click', () => {
   void startWebRtcVoice().catch((error) => {
+    logClientEvent('webrtc.setup.error', {
+      name: error instanceof Error ? error.name : 'Error',
+      message:
+        error instanceof Error ? error.message : 'Could not start WebRTC voice',
+    });
     setStatus(
       error instanceof Error ? error.message : 'Could not start WebRTC voice',
     );
