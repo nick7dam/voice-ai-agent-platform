@@ -160,6 +160,14 @@ export class OrchestratorService {
             );
           });
       };
+      const ensureTurnCurrent = () => {
+        if (!this.isTurnCurrent(sessionId, turnId)) {
+          throw new AppError(
+            'TURN_INTERRUPTED',
+            'Reasoning stopped because a newer turn interrupted this response.',
+          );
+        }
+      };
       const shouldUseTools = this.shouldUseTools(trimmedTranscript);
       const initial = shouldUseTools
         ? await this.reasoning.generate({
@@ -174,6 +182,7 @@ export class OrchestratorService {
             },
             {
               onTextDelta: (delta) => {
+                ensureTurnCurrent();
                 streamedText += delta;
                 if (delta.trim()) {
                   emitFirstToken('stream');
@@ -211,6 +220,13 @@ export class OrchestratorService {
         emitFirstToken('generate');
       }
 
+      if (!this.isTurnCurrent(sessionId, turnId)) {
+        this.logger.log(
+          `reasoning.skip_stale_after_initial session=${sessionId} turn=${turnId}`,
+        );
+        return;
+      }
+
       if (initial.toolCalls.length > 0) {
         const toolResults = await this.executeTools(
           sessionId,
@@ -219,6 +235,13 @@ export class OrchestratorService {
           initial.toolCalls,
           emit,
         );
+
+        if (!this.isTurnCurrent(sessionId, turnId)) {
+          this.logger.log(
+            `reasoning.skip_stale_after_tools session=${sessionId} turn=${turnId}`,
+          );
+          return;
+        }
 
         const followupMessages = this.buildToolFollowupMessages(
           messages,
@@ -232,13 +255,20 @@ export class OrchestratorService {
           temperature: 0.2,
         });
 
+        if (!this.isTurnCurrent(sessionId, turnId)) {
+          this.logger.log(
+            `reasoning.skip_stale_after_tool_followup session=${sessionId} turn=${turnId}`,
+          );
+          return;
+        }
+
         finalText = final.text;
         providerLatencyMs +=
           final.latencyMs +
           toolResults.reduce((sum, item) => sum + item.latencyMs, 0);
       }
 
-      if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+      if (!this.isTurnCurrent(sessionId, turnId)) {
         this.logger.log(
           `assistant.response.skip_stale session=${sessionId} turn=${turnId}`,
         );
@@ -302,8 +332,19 @@ export class OrchestratorService {
         `reasoning.end session=${sessionId} turn=${turnId} latencyMs=${totalLatencyMs} providerLatencyMs=${providerLatencyMs} toolsEnabled=${shouldUseTools} earlyAudio=${earlyAudioStarted}`,
       );
     } catch (error) {
-      this.sessions.setState(sessionId, 'idle');
       const payload = toErrorPayload(error);
+
+      if (
+        payload.code === 'TURN_INTERRUPTED' ||
+        !this.isTurnCurrent(sessionId, turnId)
+      ) {
+        this.logger.log(
+          `reasoning.cancelled session=${sessionId} turn=${turnId} code=${payload.code}`,
+        );
+        return;
+      }
+
+      this.sessions.setState(sessionId, 'idle');
       emit({
         type: 'error',
         sessionId,
@@ -313,6 +354,14 @@ export class OrchestratorService {
       this.logger.error(
         `reasoning.error session=${sessionId} turn=${turnId} code=${payload.code} message=${payload.message}`,
       );
+    }
+  }
+
+  private isTurnCurrent(sessionId: string, turnId: string): boolean {
+    try {
+      return this.sessions.isCurrentTurn(sessionId, turnId);
+    } catch {
+      return false;
     }
   }
 
@@ -457,9 +506,11 @@ export class OrchestratorService {
 
   private findSpeechBoundary(text: string, force: boolean): number | undefined {
     const streamingAudio = this.tts.canStreamAudio();
-    const minSentenceChars = streamingAudio ? 80 : 24;
-    const preferredChars = streamingAudio ? 150 : 90;
-    const maxChars = streamingAudio ? 240 : 140;
+    const gatewayOwnsSpeech = !this.tts.isEnabled();
+    const minSentenceChars = gatewayOwnsSpeech ? 48 : streamingAudio ? 64 : 24;
+    const preferredChars = gatewayOwnsSpeech ? 95 : streamingAudio ? 125 : 90;
+    const maxChars = gatewayOwnsSpeech ? 165 : streamingAudio ? 200 : 140;
+    const minSoftBoundaryChars = gatewayOwnsSpeech ? 34 : 50;
 
     for (const match of text.matchAll(/[.!?](?=\s|$)/g)) {
       const end = (match.index ?? 0) + 1;
@@ -475,12 +526,12 @@ export class OrchestratorService {
         text.lastIndexOf(':', maxChars),
       );
 
-      if (softBoundary >= 50) {
+      if (softBoundary >= minSoftBoundaryChars) {
         return softBoundary + 1;
       }
 
       const lastSpace = text.lastIndexOf(' ', maxChars);
-      if (lastSpace >= 50) {
+      if (lastSpace >= minSoftBoundaryChars) {
         return lastSpace;
       }
 

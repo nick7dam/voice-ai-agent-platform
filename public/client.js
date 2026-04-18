@@ -30,6 +30,8 @@ const state = {
   webrtcDataChannel: null,
   webrtcLocalStream: null,
   webrtcRemoteStream: null,
+  webrtcDisconnectTimer: null,
+  webrtcMuteTimer: null,
   webrtcActive: false,
   sessionId: null,
   liveStream: null,
@@ -1349,6 +1351,27 @@ function waitForIceGatheringComplete(peerConnection) {
   });
 }
 
+function clearWebRtcDisconnectTimer() {
+  if (!state.webrtcDisconnectTimer) {
+    return;
+  }
+
+  window.clearTimeout(state.webrtcDisconnectTimer);
+  state.webrtcDisconnectTimer = null;
+}
+
+function muteWebRtcAudioBriefly(durationMs = 220) {
+  if (state.webrtcMuteTimer) {
+    window.clearTimeout(state.webrtcMuteTimer);
+  }
+
+  el.webrtcAudio.muted = true;
+  state.webrtcMuteTimer = window.setTimeout(() => {
+    el.webrtcAudio.muted = false;
+    state.webrtcMuteTimer = null;
+  }, durationMs);
+}
+
 function handleWebRtcGatewayEvent(event) {
   logEvent(event);
 
@@ -1396,6 +1419,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.tts.started') {
+    el.webrtcAudio.muted = false;
     setStatus('WebRTC speaking...');
   }
 
@@ -1404,6 +1428,7 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.audio.cleared') {
+    muteWebRtcAudioBriefly();
     setStatus('WebRTC interrupted');
   }
 
@@ -1637,12 +1662,26 @@ async function startWebRtcVoice() {
   });
 
   peerConnection.addEventListener('connectionstatechange', () => {
-    setStatus(`WebRTC ${peerConnection.connectionState}`);
-    if (
-      ['failed', 'closed', 'disconnected'].includes(
-        peerConnection.connectionState,
-      )
-    ) {
+    const connectionState = peerConnection.connectionState;
+    setStatus(`WebRTC ${connectionState}`);
+
+    if (connectionState === 'connected') {
+      clearWebRtcDisconnectTimer();
+      return;
+    }
+
+    if (connectionState === 'disconnected') {
+      clearWebRtcDisconnectTimer();
+      state.webrtcDisconnectTimer = window.setTimeout(() => {
+        if (peerConnection.connectionState === 'disconnected') {
+          void stopWebRtcVoice({ notifyGateway: false });
+        }
+      }, 3000);
+      return;
+    }
+
+    if (['failed', 'closed'].includes(connectionState)) {
+      clearWebRtcDisconnectTimer();
       void stopWebRtcVoice({ notifyGateway: false });
     }
   });
@@ -1689,6 +1728,11 @@ async function stopWebRtcVoice(options = {}) {
   const statusText = options.statusText || 'WebRTC stopped';
 
   state.webrtcActive = false;
+  clearWebRtcDisconnectTimer();
+  if (state.webrtcMuteTimer) {
+    window.clearTimeout(state.webrtcMuteTimer);
+    state.webrtcMuteTimer = null;
+  }
 
   if (
     notifyGateway &&
@@ -1709,6 +1753,7 @@ async function stopWebRtcVoice(options = {}) {
   state.webrtcRemoteStream?.getTracks().forEach((track) => track.stop());
   state.webrtcRemoteStream = null;
   el.webrtcAudio.srcObject = null;
+  el.webrtcAudio.muted = false;
 
   state.webrtcSignalSocket?.close();
   state.webrtcSignalSocket = null;

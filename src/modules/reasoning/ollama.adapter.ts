@@ -197,6 +197,10 @@ export class OllamaAdapter implements LlmAdapter {
         timeoutMs: this.config.ollama.requestTimeoutMs,
       });
     } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+
       const networkError = describeNetworkError(error);
       throw new AppError(
         'OLLAMA_CONNECTION_FAILED',
@@ -239,6 +243,10 @@ export class OllamaAdapter implements LlmAdapter {
         onChunk,
       });
     } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+
       const networkError = describeNetworkError(error);
       throw new AppError(
         'OLLAMA_CONNECTION_FAILED',

@@ -7,13 +7,13 @@ import {
 import { MemoryService } from '../../memory/memory.service';
 
 const schema = z.object({
-  customerName: z.string().min(1).max(120).optional(),
-  phone: z.string().min(5).max(40).optional(),
-  vehicle: z.string().min(1).max(160).optional(),
-  registration: z.string().min(1).max(24).optional(),
-  serviceType: z.string().min(1).max(120).optional(),
-  preferredDate: z.string().max(80).optional(),
-  preferredTime: z.string().max(40).optional(),
+  customerName: z.string().min(1).max(120),
+  phone: z.string().min(5).max(40),
+  vehicle: z.string().min(1).max(160),
+  registration: z.string().min(1).max(24),
+  serviceType: z.string().min(1).max(120),
+  preferredDate: z.string().max(80),
+  preferredTime: z.string().max(40),
   notes: z.string().max(300).optional(),
 });
 

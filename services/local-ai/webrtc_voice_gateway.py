@@ -644,7 +644,7 @@ class VoiceActivityDetector:
             )
             return
 
-        asyncio.create_task(self.session.handle_user_audio(samples))
+        await self.session.enqueue_user_audio(samples)
 
     def update_noise(self, level: float, threshold: float) -> None:
         if level < threshold:
@@ -742,9 +742,13 @@ class VoiceSession:
         self.control: Optional[NestControlClient] = None
         self.vad = VoiceActivityDetector(self)
         self.resampler = AudioResampler(format="s16", layout="mono", rate=INPUT_SAMPLE_RATE)
+        self.closed = False
+        self.call_ending = False
+        self.user_turn_generation = 0
+        self.stt_queue: asyncio.Queue[Tuple[int, np.ndarray]] = asyncio.Queue(maxsize=1)
         self.tts_queue: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
         self.tts_worker_task = asyncio.create_task(self.tts_worker())
-        self.closed = False
+        self.stt_worker_task = asyncio.create_task(self.stt_worker())
         self.current_assistant_turn_id: Optional[str] = None
         self.cancelled_turn_ids: Set[str] = set()
         self.turns_with_spoken_chunks: Set[str] = set()
@@ -757,7 +761,6 @@ class VoiceSession:
         self.turn_latencies: Dict[str, TurnLatency] = {}
         self.greeting_sent = False
         self.pending_end_turn_id: Optional[str] = None
-        self.call_ending = False
 
     async def start_control(self, task_key: str) -> None:
         self.control = NestControlClient(self, task_key)
@@ -872,6 +875,8 @@ class VoiceSession:
         if self.current_assistant_turn_id:
             self.cancelled_turn_ids.add(self.current_assistant_turn_id)
 
+        self.current_assistant_turn_id = None
+        self.pending_end_turn_id = None
         await self.output_track.clear()
         while not self.tts_queue.empty():
             try:
@@ -892,6 +897,9 @@ class VoiceSession:
     async def handle_session_end_requested(self, event: Dict[str, Any]) -> None:
         payload = event.get("payload") or {}
         turn_id = str(payload.get("turnId") or "")
+        if self.call_ending or (turn_id and turn_id in self.cancelled_turn_ids):
+            return
+
         self.pending_end_turn_id = turn_id or self.current_assistant_turn_id
 
         asyncio.create_task(self.end_call_when_audio_idle("assistant_completed_call"))
@@ -931,6 +939,69 @@ class VoiceSession:
             local_turn_id=self.local_turn_sequence,
             stt_started_at=time.perf_counter(),
         )
+
+    async def enqueue_user_audio(self, samples: np.ndarray) -> None:
+        if self.closed or self.call_ending:
+            return
+
+        self.user_turn_generation += 1
+        generation = self.user_turn_generation
+        dropped = 0
+
+        while not self.stt_queue.empty():
+            try:
+                self.stt_queue.get_nowait()
+                self.stt_queue.task_done()
+                dropped += 1
+            except asyncio.QueueEmpty:
+                break
+
+        if dropped:
+            logger.info(
+                "voice.stt.drop_queued dropped=%d generation=%d",
+                dropped,
+                generation,
+            )
+
+        await self.stt_queue.put((generation, samples))
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcription.queued",
+                "timestamp": now_iso(),
+                "payload": {
+                    "generation": generation,
+                    "samples": int(samples.size),
+                },
+            }
+        )
+
+    async def stt_worker(self) -> None:
+        while not self.closed:
+            generation, samples = await self.stt_queue.get()
+
+            try:
+                if generation != self.user_turn_generation or self.call_ending:
+                    logger.info(
+                        "voice.stt.skip_queued_stale generation=%d currentGeneration=%d",
+                        generation,
+                        self.user_turn_generation,
+                    )
+                    continue
+
+                await self.handle_user_audio(samples, generation)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("voice.stt.error error=%s", exc)
+                await self.send_browser_event(
+                    {
+                        "type": "gateway.error",
+                        "timestamp": now_iso(),
+                        "payload": {"message": f"Local STT failed: {exc}"},
+                    }
+                )
+            finally:
+                self.stt_queue.task_done()
 
     async def attach_turn_latency(self, event: Dict[str, Any]) -> None:
         payload = event.get("payload") or {}
@@ -991,14 +1062,14 @@ class VoiceSession:
             }
         )
 
-    async def handle_user_audio(self, samples: np.ndarray) -> None:
+    async def handle_user_audio(self, samples: np.ndarray, generation: int) -> None:
         metric = self.begin_turn_latency()
         started_at = metric.stt_started_at
         await self.send_browser_event(
             {
                 "type": "gateway.transcription.started",
                 "timestamp": now_iso(),
-                "payload": {"samples": int(samples.size)},
+                "payload": {"generation": generation, "samples": int(samples.size)},
             }
         )
         text, latency_ms = await asyncio.to_thread(transcribe_samples, samples)
@@ -1010,6 +1081,24 @@ class VoiceSession:
             latency_ms,
             elapsed_ms(started_at),
         )
+
+        if generation != self.user_turn_generation or self.call_ending or self.closed:
+            logger.info(
+                "voice.stt.skip_stale_result generation=%d currentGeneration=%d",
+                generation,
+                self.user_turn_generation,
+            )
+            await self.send_browser_event(
+                {
+                    "type": "gateway.transcription.stale",
+                    "timestamp": now_iso(),
+                    "payload": {
+                        "generation": generation,
+                        "currentGeneration": self.user_turn_generation,
+                    },
+                }
+            )
+            return
 
         if not text:
             await self.send_browser_event(
@@ -1036,7 +1125,7 @@ class VoiceSession:
 
         await self.mark_first_text(turn_id)
 
-        if not TTS_ENABLED:
+        if self.call_ending or not TTS_ENABLED:
             return
 
         if turn_id in self.cancelled_turn_ids:
@@ -1056,7 +1145,7 @@ class VoiceSession:
 
         await self.mark_first_text(turn_id)
 
-        if not TTS_ENABLED:
+        if self.call_ending or not TTS_ENABLED:
             return
 
         if turn_id in self.cancelled_turn_ids or turn_id in self.turns_with_spoken_chunks:
@@ -1102,7 +1191,11 @@ class VoiceSession:
                             },
                         }
                     )
-                    if self.pending_end_turn_id == turn_id:
+                    if (
+                        self.pending_end_turn_id == turn_id
+                        and generation == self.tts_generation
+                        and turn_id not in self.cancelled_turn_ids
+                    ):
                         asyncio.create_task(self.end_call("assistant_completed_call"))
 
     async def synthesize_to_track(self, turn_id: str, text: str, generation: int) -> None:
@@ -1159,6 +1252,12 @@ class VoiceSession:
     async def close(self) -> None:
         self.closed = True
         self.tts_worker_task.cancel()
+        self.stt_worker_task.cancel()
+        await asyncio.gather(
+            self.tts_worker_task,
+            self.stt_worker_task,
+            return_exceptions=True,
+        )
         if self.control:
             await self.control.close()
         if self.pc:

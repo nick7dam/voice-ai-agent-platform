@@ -2,6 +2,9 @@
 
 Backend-first low-latency voice-agent MVP built with Node.js, TypeScript, NestJS, pnpm, Zod, local Whisper STT, Ollama reasoning, local Kokoro TTS, WebSockets, and an optional WebRTC media gateway.
 
+For a fresh NVIDIA GPU deployment, use
+[`GPU_INSTANCE_SETUP.md`](GPU_INSTANCE_SETUP.md).
+
 The runtime flow is:
 
 ```text

@@ -197,6 +197,10 @@ export class GroqChatAdapter implements LlmAdapter {
         },
       );
     } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+
       const networkError = describeNetworkError(error);
       throw new AppError(
         'GROQ_LLM_CONNECTION_FAILED',
@@ -242,6 +246,10 @@ export class GroqChatAdapter implements LlmAdapter {
         },
       );
     } catch (error) {
+      if (error instanceof AppError) {
+        throw error;
+      }
+
       const networkError = describeNetworkError(error);
       throw new AppError(
         'GROQ_LLM_CONNECTION_FAILED',

@@ -207,7 +207,14 @@ export function requestTextStream(
           const result = options.onChunk(chunk);
 
           if (result instanceof Promise) {
-            pendingCallbacks.push(result);
+            pendingCallbacks.push(
+              result.catch((error: unknown) => {
+                req.destroy(
+                  error instanceof Error ? error : new Error(String(error)),
+                );
+                throw error;
+              }),
+            );
           }
         } catch (error) {
           req.destroy(
@@ -297,7 +304,14 @@ export function requestBufferStream(
           });
 
           if (result instanceof Promise) {
-            pendingCallbacks.push(result);
+            pendingCallbacks.push(
+              result.catch((error: unknown) => {
+                req.destroy(
+                  error instanceof Error ? error : new Error(String(error)),
+                );
+                throw error;
+              }),
+            );
           }
         } catch (error) {
           req.destroy(
