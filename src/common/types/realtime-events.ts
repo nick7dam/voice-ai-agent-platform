@@ -27,6 +27,7 @@ export type ServerEventType =
   | 'reasoning.started'
   | 'tool.called'
   | 'tool.result'
+  | 'assistant.text.chunk'
   | 'assistant.response'
   | 'assistant.audio.started'
   | 'assistant.audio.chunk'
@@ -114,6 +115,10 @@ export type ServerEvent =
   | BaseServerEvent<
       'tool.result',
       { turnId: string; result: NormalizedToolResult }
+    >
+  | BaseServerEvent<
+      'assistant.text.chunk',
+      { turnId: string; text: string; index: number; final: boolean }
     >
   | BaseServerEvent<
       'assistant.response',

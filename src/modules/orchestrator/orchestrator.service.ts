@@ -88,9 +88,34 @@ export class OrchestratorService {
       this.logger.log(`reasoning.start session=${sessionId} turn=${turnId}`);
       let earlyAudioStarted = false;
       let speechCursor = 0;
+      let speechTextChunkIndex = 0;
       let queuedSpeech = Promise.resolve();
       let streamedText = '';
+      const emitSpeechTextChunk = (text: string, final: boolean) => {
+        const speech = text.replace(/\s+/g, ' ').trim();
+
+        if (!speech) {
+          return;
+        }
+
+        emit({
+          type: 'assistant.text.chunk',
+          sessionId,
+          timestamp: nowIso(),
+          payload: {
+            turnId,
+            text: speech,
+            index: speechTextChunkIndex,
+            final,
+          },
+        });
+        speechTextChunkIndex += 1;
+      };
       const queueEarlySpeech = (text: string) => {
+        if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+          return;
+        }
+
         const speech = text.replace(/\s+/g, ' ').trim();
 
         if (!speech) {
@@ -102,7 +127,13 @@ export class OrchestratorService {
           `tts.early.start session=${sessionId} turn=${turnId} chars=${speech.length}`,
         );
         queuedSpeech = queuedSpeech
-          .then(() => this.emitAssistantAudio(sessionId, turnId, speech, emit))
+          .then(async () => {
+            if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+              return;
+            }
+
+            await this.emitAssistantAudio(sessionId, turnId, speech, emit);
+          })
           .catch((error: unknown) => {
             const payload = toErrorPayload(error);
             this.logger.warn(
@@ -126,41 +157,27 @@ export class OrchestratorService {
               onTextDelta: (delta) => {
                 streamedText += delta;
 
-                if (
-                  !this.tts.isEnabled() ||
-                  !this.tts.shouldEmitEarlyAudio() ||
-                  !this.sessions.isAudioOutputEnabled(sessionId)
-                ) {
-                  return;
-                }
-
-                if (this.tts.shouldStreamPhrases()) {
-                  const chunks = this.extractSpeechChunks(
-                    streamedText,
-                    speechCursor,
-                    false,
-                  );
-
-                  for (const chunk of chunks) {
-                    speechCursor = chunk.endIndex;
-                    queueEarlySpeech(chunk.text);
-                  }
-
-                  return;
-                }
-
-                if (earlyAudioStarted) {
-                  return;
-                }
-
-                const [earlyChunk] = this.extractSpeechChunks(
+                const chunks = this.extractSpeechChunks(
                   streamedText,
                   speechCursor,
                   false,
                 );
-                if (earlyChunk) {
-                  speechCursor = earlyChunk.endIndex;
-                  queueEarlySpeech(earlyChunk.text);
+
+                for (const chunk of chunks) {
+                  speechCursor = chunk.endIndex;
+                  emitSpeechTextChunk(chunk.text, false);
+
+                  if (
+                    this.tts.isEnabled() &&
+                    this.tts.shouldEmitEarlyAudio() &&
+                    this.sessions.isAudioOutputEnabled(sessionId)
+                  ) {
+                    if (this.tts.shouldStreamPhrases()) {
+                      queueEarlySpeech(chunk.text);
+                    } else if (!earlyAudioStarted) {
+                      queueEarlySpeech(chunk.text);
+                    }
+                  }
                 }
               },
             },
@@ -212,6 +229,20 @@ export class OrchestratorService {
       });
       this.sessions.setState(sessionId, 'idle');
 
+      const finalSpeechChunks = this.extractSpeechChunks(
+        safeText,
+        speechCursor,
+        true,
+      );
+      for (const chunk of finalSpeechChunks) {
+        speechCursor = chunk.endIndex;
+        emitSpeechTextChunk(chunk.text, true);
+
+        if (earlyAudioStarted && this.tts.shouldStreamPhrases()) {
+          queueEarlySpeech(chunk.text);
+        }
+      }
+
       emit({
         type: 'assistant.response',
         sessionId,
@@ -223,13 +254,7 @@ export class OrchestratorService {
         },
       });
 
-      if (earlyAudioStarted && this.tts.shouldStreamPhrases()) {
-        const chunks = this.extractSpeechChunks(safeText, speechCursor, true);
-        for (const chunk of chunks) {
-          speechCursor = chunk.endIndex;
-          queueEarlySpeech(chunk.text);
-        }
-      } else if (!earlyAudioStarted) {
+      if (!earlyAudioStarted) {
         void this.emitAssistantAudio(sessionId, turnId, safeText, emit);
       }
 
@@ -419,6 +444,10 @@ export class OrchestratorService {
     text: string,
     emit: OrchestratorEmit,
   ): Promise<void> {
+    if (!this.sessions.isCurrentTurn(sessionId, turnId)) {
+      return;
+    }
+
     if (!this.tts.isEnabled()) {
       return;
     }

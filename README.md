@@ -1,6 +1,6 @@
 # Voice AI Agent Platform
 
-Backend-first low-latency voice-agent MVP built with Node.js, TypeScript, NestJS, pnpm, Zod, local Whisper STT, Ollama reasoning, local Kokoro TTS, and WebSockets.
+Backend-first low-latency voice-agent MVP built with Node.js, TypeScript, NestJS, pnpm, Zod, local Whisper STT, Ollama reasoning, local Kokoro TTS, WebSockets, and an optional WebRTC media gateway.
 
 The runtime flow is:
 
@@ -13,6 +13,22 @@ browser or CLI audio input
 -> plain text assistant response over WebSocket
 -> optional local Kokoro speech playback
 ```
+
+The lower-latency WebRTC path is:
+
+```text
+browser mic WebRTC track
+-> Python WebRTC voice gateway
+-> in-process faster-whisper STT
+-> Nest /realtime websocket for reasoning + tools
+-> assistant.text.chunk events
+-> in-process Kokoro TTS
+-> WebRTC audio track back to browser
+```
+
+In WebRTC mode there are no per-turn HTTP calls to `/transcribe`,
+`/synthesize`, or `/synthesize/stream`. Nest still talks to Ollama through
+Ollama's local HTTP API.
 
 The primary assistant response is always emitted as plain text inside structured JSON websocket events. Local text-to-speech is optional and runs behind the same modular output boundary. There is no telephony, Laravel integration, or external business backend in this MVP.
 
@@ -41,7 +57,7 @@ src/
     tasks/                        # Purpose/task registry
     health/                       # GET /health
 public/                           # Minimal browser test page
-services/local-ai/                # Local faster-whisper + Kokoro FastAPI services
+services/local-ai/                # Local faster-whisper, Kokoro, and WebRTC media gateway
 scripts/local-client.ts           # CLI websocket test client
 ```
 
@@ -169,6 +185,44 @@ pnpm local:tts
 ```
 
 See `services/local-ai/README.md` for more local model details.
+
+## WebRTC Voice Gateway
+
+The WebRTC gateway replaces the separate STT/TTS HTTP services for browser
+voice. It keeps Whisper and Kokoro loaded in one long-lived Python process,
+receives browser microphone audio as a WebRTC track, sends recognized text to
+Nest over `/realtime`, then streams synthesized audio back as a WebRTC audio
+track.
+
+Install a combined voice environment:
+
+```bash
+python3.10 -m venv .venv-voice
+. .venv-voice/bin/activate
+pip install -r services/local-ai/requirements-voice-webrtc.txt
+deactivate
+```
+
+Run Nest with TTS disabled for this path, because the gateway owns TTS:
+
+```bash
+TTS_ENABLED=false pnpm start:dev
+```
+
+Run the gateway on an NVIDIA host:
+
+```bash
+NEST_WS_URL=ws://127.0.0.1:3000/realtime pnpm local:voice:cuda
+```
+
+Then open `http://localhost:3000`, use **Start WebRTC voice**, and leave the old
+**Start live mic** button alone. The old WebSocket voice path remains available
+as a fallback.
+
+If the browser is not on the same machine/network as the GPU host, WebRTC needs
+reachable ICE candidates. In practice that means exposing the gateway port and,
+for many cloud/NAT setups, adding a TURN server. SSH port-forwarding only the
+HTTP UI port is usually not enough for WebRTC media.
 
 ## Optional Groq Fallback
 

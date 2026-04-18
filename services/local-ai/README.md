@@ -1,6 +1,8 @@
 # Local AI Services
 
 These small FastAPI services let the NestJS app run without paid STT or TTS APIs.
+The WebRTC voice gateway is also available when you want browser audio without
+per-turn STT/TTS HTTP requests.
 
 ## Exact Models
 
@@ -124,3 +126,32 @@ The TTS service preloads and warms Kokoro by default. Use `/health` to confirm
 again after startup. It exposes `/synthesize` for WAV responses and
 `/synthesize/stream` for raw `pcm_s16le` chunks used by the browser
 AudioWorklet player.
+
+## WebRTC Voice Gateway
+
+Use this path when you want the browser to send and receive audio over WebRTC
+instead of sending WAV/base64 chunks through Nest.
+
+```bash
+python3.10 -m venv .venv-voice
+. .venv-voice/bin/activate
+pip install -r services/local-ai/requirements-voice-webrtc.txt
+deactivate
+```
+
+Run Nest with backend TTS disabled:
+
+```bash
+TTS_ENABLED=false pnpm start:dev
+```
+
+Run the gateway:
+
+```bash
+NEST_WS_URL=ws://127.0.0.1:3000/realtime pnpm local:voice:cuda
+```
+
+The gateway listens on `VOICE_GATEWAY_PORT` (`8004` by default). The browser
+uses a WebSocket only for WebRTC signaling; STT and TTS run in-process inside
+`webrtc_voice_gateway.py`, so you should no longer see `/transcribe` or
+`/synthesize` requests for WebRTC voice sessions.

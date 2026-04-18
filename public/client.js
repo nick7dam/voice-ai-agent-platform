@@ -10,9 +10,11 @@ const vadConfig = {
   minPeakLevel: 0.035,
   minBargeInLevel: 0.025,
   bargeInThresholdMultiplier: 2.2,
-  bargeInHoldMs: 280,
-  bargeInMinPeakLevel: 0.06,
-  bargeInMinSpeechMs: 500,
+  bargeInHoldMs: 180,
+  bargeInMinPeakLevel: 0.05,
+  bargeInMinSpeechMs: 320,
+  assistantAudioGraceMs: 1500,
+  audioFlushDelayMs: 900,
   chunkMs: 100,
   prerollMs: 500,
   partialTranscriptMs: 1200,
@@ -23,6 +25,12 @@ const vadConfig = {
 
 const state = {
   socket: null,
+  webrtcSignalSocket: null,
+  webrtcPeerConnection: null,
+  webrtcDataChannel: null,
+  webrtcLocalStream: null,
+  webrtcRemoteStream: null,
+  webrtcActive: false,
   sessionId: null,
   liveStream: null,
   audioContext: null,
@@ -41,6 +49,7 @@ const state = {
   assistantAudioActive: false,
   assistantAudioTurnId: null,
   lastAssistantTurnId: null,
+  lastAssistantAudioAt: 0,
   cancelledAudioTurnIds: new Set(),
   interruptSentForTurnIds: new Set(),
   streamActive: false,
@@ -48,6 +57,7 @@ const state = {
   playbackContext: null,
   streamPlaybackNode: null,
   streamPlaybackReady: null,
+  streamFlushTimer: null,
   streamAudioPlaying: false,
   streamAudioInputSampleRate: 24000,
   audioSources: new Set(),
@@ -66,6 +76,7 @@ const state = {
 
 const el = {
   wsUrl: document.querySelector('#wsUrl'),
+  webrtcUrl: document.querySelector('#webrtcUrl'),
   taskKey: document.querySelector('#taskKey'),
   taskName: document.querySelector('#taskName'),
   systemPrompt: document.querySelector('#systemPrompt'),
@@ -84,12 +95,15 @@ const el = {
   startSession: document.querySelector('#startSession'),
   startLive: document.querySelector('#startLive'),
   stopLive: document.querySelector('#stopLive'),
+  startWebrtc: document.querySelector('#startWebrtc'),
+  stopWebrtc: document.querySelector('#stopWebrtc'),
   sendText: document.querySelector('#sendText'),
   toggleAudio: document.querySelector('#toggleAudio'),
   endSession: document.querySelector('#endSession'),
   debugText: document.querySelector('#debugText'),
   status: document.querySelector('#status'),
   micLevel: document.querySelector('#micLevel'),
+  webrtcAudio: document.querySelector('#webrtcAudio'),
   chatHistory: document.querySelector('#chatHistory'),
   events: document.querySelector('#events'),
   assistant: document.querySelector('#assistant'),
@@ -119,9 +133,19 @@ function defaultWebSocketUrl() {
   return `${protocol}//${window.location.host}/realtime`;
 }
 
+function defaultWebRtcUrl() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const host = window.location.hostname || 'localhost';
+  return `${protocol}//${host}:8004`;
+}
+
 function initializeWebSocketUrl() {
   if (el.wsUrl.value === 'ws://localhost:3000/realtime') {
     el.wsUrl.value = defaultWebSocketUrl();
+  }
+
+  if (el.webrtcUrl.value === 'ws://localhost:8004') {
+    el.webrtcUrl.value = defaultWebRtcUrl();
   }
 }
 
@@ -174,15 +198,18 @@ function send(event) {
 function updateButtons() {
   const connected = state.socket?.readyState === WebSocket.OPEN;
   const hasSession = Boolean(state.sessionId);
+  const webRtcActive = state.webrtcActive;
   el.startSession.disabled = !connected || hasSession;
-  el.startLive.disabled = !hasSession || state.streamActive;
+  el.startLive.disabled = !hasSession || state.streamActive || webRtcActive;
   el.stopLive.disabled = !state.streamActive;
-  el.sendText.disabled = !hasSession;
-  el.toggleAudio.disabled = !hasSession;
+  el.startWebrtc.disabled = webRtcActive;
+  el.stopWebrtc.disabled = !webRtcActive;
+  el.sendText.disabled = !hasSession || webRtcActive;
+  el.toggleAudio.disabled = !hasSession || webRtcActive;
   el.toggleAudio.textContent = state.audioPlaybackEnabled
     ? 'Audio on'
     : 'Audio off';
-  el.endSession.disabled = !hasSession;
+  el.endSession.disabled = !hasSession || webRtcActive;
 }
 
 function populateTaskForm(task) {
@@ -350,6 +377,22 @@ function getCurrentAssistantTurnId() {
   return state.assistantAudioTurnId ?? state.lastAssistantTurnId;
 }
 
+function markAssistantAudioActivity(turnId) {
+  state.lastAssistantAudioAt = performance.now();
+
+  if (turnId) {
+    state.lastAssistantTurnId = turnId;
+  }
+}
+
+function hasRecentAssistantAudioActivity() {
+  return (
+    Boolean(state.lastAssistantTurnId) &&
+    performance.now() - state.lastAssistantAudioAt <=
+      vadConfig.assistantAudioGraceMs
+  );
+}
+
 function hasAssistantVoiceOutput() {
   return (
     state.assistantAudioActive ||
@@ -361,7 +404,11 @@ function hasAssistantVoiceOutput() {
 }
 
 function hasInterruptibleAssistantOutput() {
-  return state.assistantBusy || hasAssistantVoiceOutput();
+  return (
+    state.assistantBusy ||
+    hasAssistantVoiceOutput() ||
+    hasRecentAssistantAudioActivity()
+  );
 }
 
 function isLikelyBargeIn(level, threshold) {
@@ -373,7 +420,7 @@ function isLikelyBargeIn(level, threshold) {
 }
 
 function shouldStartUtterance(level, threshold, deltaMs) {
-  if (!hasAssistantVoiceOutput()) {
+  if (!hasInterruptibleAssistantOutput()) {
     state.bargeInCandidateStartedAt = 0;
     return level >= threshold;
   }
@@ -407,6 +454,8 @@ function markAssistantAudioCancelled(turnId) {
 }
 
 function stopAssistantAudio(options = {}) {
+  clearPendingStreamFlush();
+
   if (options.cancelTurn) {
     markAssistantAudioCancelled(options.turnId);
   }
@@ -486,7 +535,7 @@ function cancelAssistantAudioTurn(turnId, reason) {
 
   state.cancelledAudioTurnIds.add(turnId);
 
-  if (state.assistantAudioTurnId === turnId) {
+  if (getCurrentAssistantTurnId() === turnId) {
     stopAssistantAudio({ cancelTurn: true, turnId });
   }
 
@@ -499,6 +548,7 @@ function resetAssistantOutputState(options = {}) {
   state.assistantAudioActive = false;
   state.assistantAudioTurnId = null;
   state.lastAssistantTurnId = null;
+  state.lastAssistantAudioAt = 0;
 
   if (options.clearCancelled !== false) {
     state.cancelledAudioTurnIds.clear();
@@ -515,6 +565,32 @@ function audioBase64ToArrayBuffer(audioBase64) {
   }
 
   return bytes.buffer;
+}
+
+function clearPendingStreamFlush() {
+  if (!state.streamFlushTimer) {
+    return;
+  }
+
+  window.clearTimeout(state.streamFlushTimer);
+  state.streamFlushTimer = null;
+}
+
+function scheduleStreamFlush(turnId) {
+  clearPendingStreamFlush();
+
+  state.streamFlushTimer = window.setTimeout(() => {
+    state.streamFlushTimer = null;
+
+    if (
+      state.cancelledAudioTurnIds.has(turnId) ||
+      getCurrentAssistantTurnId() !== turnId
+    ) {
+      return;
+    }
+
+    state.streamPlaybackNode?.port.postMessage({ type: 'flush' });
+  }, vadConfig.audioFlushDelayMs);
 }
 
 async function ensurePlaybackContext() {
@@ -580,6 +656,9 @@ async function ensureStreamPlayback(sampleRate) {
 }
 
 function enqueueAssistantPcmAudio(payload) {
+  clearPendingStreamFlush();
+  markAssistantAudioActivity(payload.turnId);
+
   const sampleRate = Number(payload.sampleRate || 24000);
   const audioBuffer = audioBase64ToArrayBuffer(payload.audioBase64);
   const token = state.audioPlaybackToken;
@@ -604,6 +683,7 @@ function enqueueAssistantPcmAudio(payload) {
       }
 
       state.streamAudioPlaying = true;
+      markAssistantAudioActivity(payload.turnId);
       node.port.postMessage(
         {
           type: 'chunk',
@@ -647,12 +727,15 @@ function enqueueAssistantAudio(payload) {
     return false;
   }
 
+  clearPendingStreamFlush();
+
   if (payload.streaming && payload.encoding === 'pcm_s16le') {
     return enqueueAssistantPcmAudio(payload);
   }
 
   const token = state.audioPlaybackToken;
   const audioBuffer = audioBase64ToArrayBuffer(payload.audioBase64);
+  markAssistantAudioActivity(payload.turnId);
   state.pendingAudioSchedules += 1;
   state.audioScheduleChain = state.audioScheduleChain
     .then(() => scheduleAssistantAudio(audioBuffer, payload.turnId, token))
@@ -770,7 +853,7 @@ function rememberPcmChunk(samples) {
 }
 
 function createTurn(now, thresholdAtStart) {
-  const startedDuringAssistantOutput = hasAssistantVoiceOutput();
+  const startedDuringAssistantOutput = hasInterruptibleAssistantOutput();
   const preroll = startedDuringAssistantOutput
     ? []
     : state.prerollChunks.filter(
@@ -1201,6 +1284,260 @@ async function stopLiveMic() {
   updateButtons();
 }
 
+function waitForIceGatheringComplete(peerConnection) {
+  if (peerConnection.iceGatheringState === 'complete') {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(resolve, 5000);
+    const onStateChange = () => {
+      if (peerConnection.iceGatheringState === 'complete') {
+        window.clearTimeout(timeout);
+        peerConnection.removeEventListener(
+          'icegatheringstatechange',
+          onStateChange,
+        );
+        resolve();
+      }
+    };
+    peerConnection.addEventListener('icegatheringstatechange', onStateChange);
+  });
+}
+
+function handleWebRtcGatewayEvent(event) {
+  logEvent(event);
+
+  if (event.type === 'session.started') {
+    state.sessionId = event.payload.sessionId;
+    el.chatHistory.textContent = '';
+    el.assistant.textContent = '';
+    setStatus(`WebRTC session ${state.sessionId}`);
+  }
+
+  if (event.type === 'gateway.peer.state') {
+    setStatus(`WebRTC ${event.payload.state}`);
+  }
+
+  if (event.type === 'gateway.speech.started') {
+    setStatus('WebRTC heard speech');
+  }
+
+  if (event.type === 'gateway.speech.discarded') {
+    setStatus('WebRTC ignored noise/silence');
+  }
+
+  if (event.type === 'gateway.transcription.started') {
+    setStatus('WebRTC transcribing...');
+  }
+
+  if (event.type === 'gateway.transcription.empty') {
+    setStatus('WebRTC did not catch that');
+  }
+
+  if (event.type === 'gateway.tts.started') {
+    setStatus('WebRTC speaking...');
+  }
+
+  if (event.type === 'gateway.tts.ended') {
+    setStatus('WebRTC listening...');
+  }
+
+  if (event.type === 'gateway.audio.cleared') {
+    setStatus('WebRTC interrupted');
+  }
+
+  if (event.type === 'transcript.final') {
+    appendChatMessage('user', event.payload.text || '');
+    setStatus(`Heard: ${event.payload.text || '(empty)'}`);
+  }
+
+  if (event.type === 'assistant.response') {
+    appendChatMessage('assistant', event.payload.text || '');
+    el.assistant.textContent = event.payload.text || '';
+    setStatus('WebRTC listening...');
+  }
+
+  if (event.type === 'session.interrupted') {
+    setStatus('WebRTC interrupted');
+  }
+
+  if (event.type === 'gateway.error' || event.type === 'error') {
+    const payload = event.payload || {};
+    setStatus(`${payload.code || event.type}: ${payload.message || 'error'}`);
+  }
+
+  updateButtons();
+}
+
+function handleWebRtcEnvelope(message) {
+  const envelope = JSON.parse(message.data || message);
+
+  if (envelope.type === 'event') {
+    handleWebRtcGatewayEvent(envelope.event);
+    return envelope;
+  }
+
+  logClientEvent('webrtc.signaling', envelope);
+  return envelope;
+}
+
+async function startWebRtcVoice() {
+  if (state.webrtcActive) {
+    return;
+  }
+
+  state.webrtcActive = true;
+  setStatus('Connecting WebRTC gateway...');
+  updateButtons();
+
+  const signalSocket = new WebSocket(el.webrtcUrl.value.trim());
+  state.webrtcSignalSocket = signalSocket;
+
+  let readyResolve;
+  let answerResolve;
+  const readyPromise = new Promise((resolve) => {
+    readyResolve = resolve;
+  });
+  const answerPromise = new Promise((resolve) => {
+    answerResolve = resolve;
+  });
+
+  signalSocket.addEventListener('message', (message) => {
+    const envelope = handleWebRtcEnvelope(message);
+
+    if (envelope.type === 'ready') {
+      readyResolve(envelope);
+    }
+
+    if (envelope.type === 'answer') {
+      answerResolve(envelope);
+    }
+
+    if (envelope.type === 'error') {
+      setStatus(`WebRTC gateway error: ${envelope.message}`);
+    }
+  });
+
+  signalSocket.addEventListener('close', () => {
+    if (state.webrtcActive) {
+      void stopWebRtcVoice({ notifyGateway: false });
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    signalSocket.addEventListener('open', resolve, { once: true });
+    signalSocket.addEventListener('error', reject, { once: true });
+  });
+
+  signalSocket.send(
+    JSON.stringify({
+      type: 'start',
+      taskKey: el.taskKey.value.trim() || 'general_voice_assistant',
+    }),
+  );
+  await readyPromise;
+
+  const localStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+    },
+  });
+  state.webrtcLocalStream = localStream;
+
+  const peerConnection = new RTCPeerConnection();
+  state.webrtcPeerConnection = peerConnection;
+
+  const dataChannel = peerConnection.createDataChannel('events');
+  state.webrtcDataChannel = dataChannel;
+  dataChannel.addEventListener('message', (message) => {
+    handleWebRtcEnvelope(message);
+  });
+
+  const remoteStream = new MediaStream();
+  state.webrtcRemoteStream = remoteStream;
+  el.webrtcAudio.srcObject = remoteStream;
+
+  peerConnection.addEventListener('track', (event) => {
+    remoteStream.addTrack(event.track);
+    void el.webrtcAudio.play().catch(() => undefined);
+  });
+
+  peerConnection.addEventListener('connectionstatechange', () => {
+    setStatus(`WebRTC ${peerConnection.connectionState}`);
+    if (
+      ['failed', 'closed', 'disconnected'].includes(
+        peerConnection.connectionState,
+      )
+    ) {
+      void stopWebRtcVoice({ notifyGateway: false });
+    }
+  });
+
+  for (const track of localStream.getTracks()) {
+    peerConnection.addTrack(track, localStream);
+  }
+
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peerConnection);
+
+  signalSocket.send(
+    JSON.stringify({
+      type: 'offer',
+      sdp: peerConnection.localDescription.sdp,
+      sdpType: peerConnection.localDescription.type,
+    }),
+  );
+
+  const answer = await answerPromise;
+  await peerConnection.setRemoteDescription(
+    new RTCSessionDescription({
+      type: answer.sdpType,
+      sdp: answer.sdp,
+    }),
+  );
+
+  setStatus('WebRTC listening...');
+  updateButtons();
+}
+
+async function stopWebRtcVoice(options = {}) {
+  const notifyGateway = options.notifyGateway !== false;
+
+  state.webrtcActive = false;
+
+  if (
+    notifyGateway &&
+    state.webrtcSignalSocket?.readyState === WebSocket.OPEN
+  ) {
+    state.webrtcSignalSocket.send(JSON.stringify({ type: 'stop' }));
+  }
+
+  state.webrtcDataChannel?.close();
+  state.webrtcDataChannel = null;
+
+  state.webrtcPeerConnection?.close();
+  state.webrtcPeerConnection = null;
+
+  state.webrtcLocalStream?.getTracks().forEach((track) => track.stop());
+  state.webrtcLocalStream = null;
+
+  state.webrtcRemoteStream?.getTracks().forEach((track) => track.stop());
+  state.webrtcRemoteStream = null;
+  el.webrtcAudio.srcObject = null;
+
+  state.webrtcSignalSocket?.close();
+  state.webrtcSignalSocket = null;
+
+  state.sessionId = null;
+  setStatus('WebRTC stopped');
+  updateButtons();
+}
+
 el.loadTask.addEventListener('click', () => {
   void loadTaskConfig().catch((error) => {
     setTaskStatus(
@@ -1309,6 +1646,8 @@ el.connect.addEventListener('click', () => {
         return;
       }
 
+      clearPendingStreamFlush();
+
       if (state.currentTurn || state.stoppingRecorder) {
         cancelAssistantAudioTurn(
           event.payload.turnId,
@@ -1326,7 +1665,7 @@ el.connect.addEventListener('click', () => {
 
       state.assistantAudioActive = true;
       state.assistantAudioTurnId = event.payload.turnId;
-      state.lastAssistantTurnId = event.payload.turnId;
+      markAssistantAudioActivity(event.payload.turnId);
       state.prerollChunks = [];
       state.bargeInCandidateStartedAt = 0;
       setStatus('Preparing voice...');
@@ -1339,9 +1678,12 @@ el.connect.addEventListener('click', () => {
     }
 
     if (event.type === 'assistant.audio.ended') {
-      if (state.streamPlaybackNode) {
-        state.streamPlaybackNode.port.postMessage({ type: 'flush' });
+      if (state.cancelledAudioTurnIds.has(event.payload.turnId)) {
+        return;
       }
+
+      markAssistantAudioActivity(event.payload.turnId);
+      scheduleStreamFlush(event.payload.turnId);
 
       if (state.assistantAudioTurnId === event.payload.turnId) {
         state.assistantAudioActive = false;
@@ -1396,6 +1738,24 @@ el.startLive.addEventListener('click', () => {
 el.stopLive.addEventListener('click', () => {
   void stopLiveMic().catch((error) => {
     setStatus(error instanceof Error ? error.message : 'Could not stop mic');
+    updateButtons();
+  });
+});
+
+el.startWebrtc.addEventListener('click', () => {
+  void startWebRtcVoice().catch((error) => {
+    setStatus(
+      error instanceof Error ? error.message : 'Could not start WebRTC voice',
+    );
+    void stopWebRtcVoice({ notifyGateway: false });
+  });
+});
+
+el.stopWebrtc.addEventListener('click', () => {
+  void stopWebRtcVoice().catch((error) => {
+    setStatus(
+      error instanceof Error ? error.message : 'Could not stop WebRTC voice',
+    );
     updateButtons();
   });
 });
