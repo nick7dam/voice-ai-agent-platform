@@ -6,6 +6,8 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
     this.bufferedFrames = 0;
     this.inputSampleRate = 24000;
     this.wasPlaying = false;
+    this.started = false;
+    this.prebufferFrames = Math.round(sampleRate * 0.08);
     this.leftoverByte = null;
 
     this.port.onmessage = (message) => {
@@ -24,7 +26,15 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
         this.readIndex = 0;
         this.bufferedFrames = 0;
         this.wasPlaying = false;
+        this.started = false;
         this.leftoverByte = null;
+        return;
+      }
+
+      if (data.type === 'flush') {
+        if (this.queue.length > 0 || this.bufferedFrames > 0) {
+          this.started = true;
+        }
         return;
       }
 
@@ -117,6 +127,15 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
       return true;
     }
 
+    if (!this.started) {
+      if (this.bufferedFrames < this.prebufferFrames) {
+        output.fill(0);
+        return true;
+      }
+
+      this.started = true;
+    }
+
     let outputIndex = 0;
 
     while (outputIndex < output.length) {
@@ -127,6 +146,7 @@ class PcmStreamPlayer extends AudioWorkletProcessor {
 
         if (this.wasPlaying) {
           this.wasPlaying = false;
+          this.started = false;
           this.port.postMessage({ type: 'drain' });
         }
 

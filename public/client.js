@@ -1,11 +1,11 @@
 const vadConfig = {
   minSpeechThreshold: 0.025,
   noiseMultiplier: 3,
-  silenceMs: 500,
-  maxUtteranceMs: 6500,
-  endThresholdPeakRatio: 0.32,
-  minUtteranceMs: 450,
-  minSpeechMs: 300,
+  silenceMs: 400,
+  maxUtteranceMs: 8000,
+  endThresholdPeakRatio: 0.35,
+  minUtteranceMs: 380,
+  minSpeechMs: 260,
   minAudioBytes: 2500,
   minPeakLevel: 0.035,
   minBargeInLevel: 0.025,
@@ -833,7 +833,7 @@ function startUtteranceRecorder(thresholdAtStart) {
 
 function waitForPcmCapture() {
   return new Promise((resolve) => {
-    window.setTimeout(resolve, 120);
+    window.setTimeout(resolve, 80);
   });
 }
 
@@ -1098,7 +1098,7 @@ function startPcmCapture(source) {
     return;
   }
 
-  const processor = state.audioContext.createScriptProcessor(4096, 1, 1);
+  const processor = state.audioContext.createScriptProcessor(1024, 1, 1);
   const mute = state.audioContext.createGain();
   mute.gain.value = 0;
   state.captureProcessor = processor;
@@ -1137,10 +1137,22 @@ async function startLiveMic() {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
+      channelCount: 1,
+      sampleRate: 16000,
     },
   });
 
-  state.audioContext = new AudioContext();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  try {
+    state.audioContext = new AudioContextClass({
+      latencyHint: 'interactive',
+      sampleRate: 16000,
+    });
+  } catch {
+    state.audioContext = new AudioContextClass({
+      latencyHint: 'interactive',
+    });
+  }
   const source = state.audioContext.createMediaStreamSource(state.liveStream);
   state.analyser = state.audioContext.createAnalyser();
   state.analyser.fftSize = 2048;
@@ -1327,6 +1339,10 @@ el.connect.addEventListener('click', () => {
     }
 
     if (event.type === 'assistant.audio.ended') {
+      if (state.streamPlaybackNode) {
+        state.streamPlaybackNode.port.postMessage({ type: 'flush' });
+      }
+
       if (state.assistantAudioTurnId === event.payload.turnId) {
         state.assistantAudioActive = false;
         state.assistantAudioTurnId = null;

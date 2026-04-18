@@ -374,9 +374,10 @@ export class OrchestratorService {
   }
 
   private findSpeechBoundary(text: string, force: boolean): number | undefined {
-    const minSentenceChars = 24;
-    const preferredChars = 90;
-    const maxChars = 140;
+    const streamingAudio = this.tts.canStreamAudio();
+    const minSentenceChars = streamingAudio ? 80 : 24;
+    const preferredChars = streamingAudio ? 150 : 90;
+    const maxChars = streamingAudio ? 240 : 140;
 
     for (const match of text.matchAll(/[.!?](?=\s|$)/g)) {
       const end = (match.index ?? 0) + 1;

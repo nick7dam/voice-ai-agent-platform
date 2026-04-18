@@ -58,8 +58,18 @@ export class TtsService {
       return [];
     }
 
-    const maxChars = this.config.tts.maxChars;
+    const maxChars = this.maxCharsForCurrentProvider();
     const textForSpeech = this.selectTextForSpeech(normalized, maxChars);
+
+    if (this.canStreamAudio()) {
+      const chunks = this.splitLongText(textForSpeech, maxChars);
+      return chunks.map((chunk, index) => ({
+        index,
+        total: chunks.length,
+        text: chunk,
+      }));
+    }
+
     const sentences = textForSpeech.match(/[^.!?]+[.!?]*/g) ?? [textForSpeech];
     const chunks: string[] = [];
     let current = '';
@@ -86,6 +96,12 @@ export class TtsService {
       total: chunks.length,
       text: chunk,
     }));
+  }
+
+  private maxCharsForCurrentProvider(): number {
+    return this.canStreamAudio()
+      ? Math.max(this.config.tts.maxChars, 450)
+      : this.config.tts.maxChars;
   }
 
   private selectTextForSpeech(text: string, maxChars: number): string {
