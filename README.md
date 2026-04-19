@@ -235,6 +235,9 @@ Then run:
 ```bash
 LOCAL_TTS_ENGINE=chatterbox_turbo \
 LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH=/absolute/path/to/reference-voice.wav \
+VOICE_TTS_FIRST_PHRASE_MAX_CHARS=36 \
+VOICE_TTS_PHRASE_TARGET_CHARS=42 \
+VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN=180 \
 NEST_WS_URL=ws://127.0.0.1:3000/realtime \
 pnpm local:voice:chatterbox:cuda
 ```
@@ -242,6 +245,9 @@ pnpm local:voice:chatterbox:cuda
 The Chatterbox path keeps the assistant response text plain. The gateway may add
 small TTS-only paralinguistic cues such as `[chuckle]` to the audio prompt when
 `LOCAL_CHATTERBOX_EMOTION_TAGS=true`; those tags are not sent to chat history.
+Chatterbox Turbo generates complete audio for each text phrase, so the gateway
+keeps phrases intentionally short and caps spoken characters per turn while the
+full assistant text still appears in the UI.
 
 Then open `http://localhost:3000`, use **Start WebRTC voice**, and leave the old
 **Start live mic** button alone. The old WebSocket voice path remains available
@@ -305,7 +311,7 @@ GROQ_TTS_MODEL=canopylabs/orpheus-v1-english
 `PARTIAL_STT_ENABLED=false` avoids extra partial Whisper calls while the user is still speaking. Turn it on only when you want live partial transcript text and can afford the extra GPU work.
 The browser sends throttled `audio.partial` snapshots while speech is active. If `PARTIAL_STT_ENABLED=true`, the backend emits `transcript.partial` for live feedback, then waits for `audio.turn_end` before sending the final transcript to reasoning.
 `TTS_ENABLED` controls optional speech playback. Text is still emitted as plain `assistant.response`; with streaming phrase playback, audio chunks may arrive before the final text event.
-`TTS_PLAYBACK_MODE=streaming_phrases` speaks short phrases from the LLM stream for the most natural local demo. With local Kokoro, the backend uses `/synthesize/stream` and sends raw `pcm_s16le` chunks to the browser `AudioWorklet` player. Use `first_sentence` or `first_segment` to speak less, or `full` to wait and synthesize the full response.
+`TTS_PLAYBACK_MODE=streaming_phrases` speaks short phrases from the LLM stream for the most natural local demo. With local Kokoro, the backend uses `/synthesize/stream` and sends raw `pcm_s16le` chunks to the browser `AudioWorklet` player. With Chatterbox Turbo, the WebRTC gateway uses phrase-ahead synthesis because Chatterbox returns one waveform per phrase. Use `first_sentence` or `first_segment` to speak less, or `full` to wait and synthesize the full response.
 `TTS_CONCURRENCY=1` is recommended for local Kokoro so multiple audio chunks do not fight for the same GPU.
 
 ## Run

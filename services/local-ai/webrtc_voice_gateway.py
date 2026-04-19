@@ -78,6 +78,19 @@ CHATTERBOX_REPETITION_PENALTY = float(
 CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.5"))
 CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
 CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
+TTS_MIN_PHRASE_CHARS = max(1, int(os.getenv("VOICE_TTS_MIN_PHRASE_CHARS", "8")))
+TTS_PHRASE_TARGET_CHARS = max(
+    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_PHRASE_TARGET_CHARS", "42"))
+)
+TTS_PHRASE_MAX_CHARS = max(
+    TTS_PHRASE_TARGET_CHARS, int(os.getenv("VOICE_TTS_PHRASE_MAX_CHARS", "70"))
+)
+TTS_FIRST_PHRASE_MAX_CHARS = max(
+    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_FIRST_PHRASE_MAX_CHARS", "36"))
+)
+TTS_MAX_SPOKEN_CHARS_PER_TURN = max(
+    0, int(os.getenv("VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN", "180"))
+)
 
 INPUT_SAMPLE_RATE = 16000
 MIN_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_MIN_SPEECH_THRESHOLD", "0.025"))
@@ -114,6 +127,10 @@ logger = logging.getLogger("webrtc_voice_gateway")
 whisper_model: Optional[WhisperModel] = None
 tts_pipelines: Dict[str, Any] = {}
 chatterbox_model: Optional[Any] = None
+
+
+def is_chatterbox_engine() -> bool:
+    return TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}
 
 
 def comma_list(value: str) -> List[str]:
@@ -483,7 +500,7 @@ def strip_tts_asides(text: str) -> str:
 
 def prepare_text_for_tts_engine(text: str) -> str:
     text = normalize_text_for_speech(text)
-    if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}:
+    if is_chatterbox_engine():
         return decorate_text_for_chatterbox(text)
     return text
 
@@ -508,6 +525,101 @@ def decorate_text_for_chatterbox(text: str) -> str:
         )
 
     return text
+
+
+def split_text_for_tts_queue(text: str, first_phrase: bool) -> List[str]:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return []
+
+    if not is_chatterbox_engine():
+        return [text]
+
+    return split_chatterbox_phrases(text, first_phrase)
+
+
+def split_chatterbox_phrases(text: str, first_phrase: bool) -> List[str]:
+    phrases: List[str] = []
+    remaining = text
+    use_first_limit = first_phrase
+
+    while remaining:
+        limit = TTS_FIRST_PHRASE_MAX_CHARS if use_first_limit else TTS_PHRASE_MAX_CHARS
+        target = min(
+            limit,
+            TTS_FIRST_PHRASE_MAX_CHARS
+            if use_first_limit
+            else TTS_PHRASE_TARGET_CHARS,
+        )
+        boundary = choose_chatterbox_phrase_boundary(remaining, limit, target)
+        phrase = remaining[:boundary].strip()
+        remaining = remaining[boundary:].strip()
+
+        if phrase:
+            if (
+                phrases
+                and len(phrase) < TTS_MIN_PHRASE_CHARS
+                and len(phrases[-1]) + len(phrase) + 1 <= TTS_PHRASE_MAX_CHARS
+            ):
+                phrases[-1] = f"{phrases[-1]} {phrase}"
+            else:
+                phrases.append(phrase)
+
+        use_first_limit = False
+
+    return phrases
+
+
+def choose_chatterbox_phrase_boundary(text: str, limit: int, target: int) -> int:
+    if len(text) <= limit:
+        return len(text)
+
+    search = text[:limit]
+    min_chars = min(TTS_MIN_PHRASE_CHARS, max(1, target))
+
+    for pattern in (r"[.!?](?=\s|$)", r"[,;:](?=\s|$)"):
+        matches = [
+            match.start() + 1
+            for match in re.finditer(pattern, search)
+            if match.start() + 1 >= min_chars
+        ]
+        for end in matches:
+            if end >= target:
+                return end
+        if matches:
+            return matches[-1]
+
+    target_space = search.rfind(" ", 0, min(target + 1, len(search)))
+    if target_space >= min_chars:
+        return target_space
+
+    last_space = search.rfind(" ")
+    if last_space >= min_chars:
+        return last_space
+
+    return limit
+
+
+def trim_tts_phrase_to_budget(text: str, remaining_chars: int) -> str:
+    if remaining_chars <= 0:
+        return ""
+
+    if len(text) <= remaining_chars:
+        return text
+
+    trimmed = text[:remaining_chars].rstrip()
+    last_space = trimmed.rfind(" ")
+    if last_space >= TTS_MIN_PHRASE_CHARS:
+        trimmed = trimmed[:last_space].rstrip()
+
+    trimmed = trimmed.rstrip(" ,;:")
+    if trimmed and not re.search(r"[.!?]$", trimmed):
+        if len(trimmed) + 1 <= remaining_chars:
+            trimmed = f"{trimmed}."
+        elif len(trimmed) > 1:
+            trimmed = f"{trimmed[:-1].rstrip()}."
+
+    return trimmed
 
 
 def format_time_for_speech(hour: int, minute: int, meridiem: Optional[str]) -> str:
@@ -648,7 +760,7 @@ def iter_tts_audio(text: str):
                 yield audio_to_float32(audio)
         return
 
-    if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}:
+    if is_chatterbox_engine():
         model = get_chatterbox_model()
         started_at = time.perf_counter()
         logger.info(
@@ -1018,6 +1130,7 @@ class VoiceSession:
         self.current_assistant_turn_id: Optional[str] = None
         self.cancelled_turn_ids: Set[str] = set()
         self.turns_with_spoken_chunks: Set[str] = set()
+        self.spoken_chars_by_turn: Dict[str, int] = {}
         self.tts_generation = 0
         self.assistant_speaking = False
         self.last_assistant_audio_at = 0.0
@@ -1139,7 +1252,7 @@ class VoiceSession:
                 "payload": {"text": text},
             }
         )
-        await self.tts_queue.put(("gateway-greeting", text))
+        await self.queue_tts_text("gateway-greeting", text, mark_spoken_chunk=False)
 
     async def interrupt_assistant(self, reason: str) -> None:
         await self.clear_assistant_audio(reason)
@@ -1407,9 +1520,7 @@ class VoiceSession:
         if turn_id in self.cancelled_turn_ids:
             return
 
-        self.current_assistant_turn_id = turn_id
-        self.turns_with_spoken_chunks.add(turn_id)
-        await self.tts_queue.put((turn_id, text))
+        await self.queue_tts_text(turn_id, text, mark_spoken_chunk=True)
 
     async def handle_assistant_response(self, event: Dict[str, Any]) -> None:
         payload = event.get("payload") or {}
@@ -1427,8 +1538,64 @@ class VoiceSession:
         if turn_id in self.cancelled_turn_ids or turn_id in self.turns_with_spoken_chunks:
             return
 
-        self.current_assistant_turn_id = turn_id
-        await self.tts_queue.put((turn_id, text))
+        await self.queue_tts_text(turn_id, text, mark_spoken_chunk=True)
+
+    async def queue_tts_text(
+        self,
+        turn_id: str,
+        text: str,
+        mark_spoken_chunk: bool,
+    ) -> None:
+        text = re.sub(r"\s+", " ", text).strip()
+        if not turn_id or not text or self.call_ending or not TTS_ENABLED:
+            return
+
+        if turn_id in self.cancelled_turn_ids:
+            return
+
+        first_phrase = self.spoken_chars_by_turn.get(turn_id, 0) == 0
+        phrases = split_text_for_tts_queue(text, first_phrase)
+        queued = 0
+        queued_chars = 0
+
+        for phrase in phrases:
+            if self.call_ending or turn_id in self.cancelled_turn_ids:
+                return
+
+            used_chars = self.spoken_chars_by_turn.get(turn_id, 0)
+            remaining_chars = (
+                TTS_MAX_SPOKEN_CHARS_PER_TURN - used_chars
+                if TTS_MAX_SPOKEN_CHARS_PER_TURN > 0
+                else len(phrase)
+            )
+            phrase = trim_tts_phrase_to_budget(phrase, remaining_chars)
+            if not phrase:
+                logger.info(
+                    "voice.tts.drop_budget turn=%s usedChars=%d maxChars=%d",
+                    turn_id,
+                    used_chars,
+                    TTS_MAX_SPOKEN_CHARS_PER_TURN,
+                )
+                break
+
+            self.current_assistant_turn_id = turn_id
+            if mark_spoken_chunk:
+                self.turns_with_spoken_chunks.add(turn_id)
+
+            self.spoken_chars_by_turn[turn_id] = used_chars + len(phrase)
+            await self.tts_queue.put((turn_id, phrase))
+            queued += 1
+            queued_chars += len(phrase)
+
+        if queued:
+            logger.info(
+                "voice.tts.queue turn=%s engine=%s phrases=%d chars=%d totalTurnChars=%d",
+                turn_id,
+                TTS_ENGINE,
+                queued,
+                queued_chars,
+                self.spoken_chars_by_turn.get(turn_id, 0),
+            )
 
     async def tts_worker(self) -> None:
         while not self.closed:
@@ -1699,9 +1866,7 @@ async def preload_models() -> None:
 async def main() -> None:
     ice_servers = browser_ice_servers()
     active_tts_model = (
-        CHATTERBOX_MODEL_NAME
-        if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}
-        else TTS_MODEL_NAME
+        CHATTERBOX_MODEL_NAME if is_chatterbox_engine() else TTS_MODEL_NAME
     )
     logger.info(
         "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
@@ -1717,6 +1882,14 @@ async def main() -> None:
         len(ice_servers),
         browser_ice_transport_policy(),
     )
+    if is_chatterbox_engine():
+        logger.info(
+            "voice.tts.chatterbox.phrasing firstMax=%d target=%d max=%d turnMax=%d",
+            TTS_FIRST_PHRASE_MAX_CHARS,
+            TTS_PHRASE_TARGET_CHARS,
+            TTS_PHRASE_MAX_CHARS,
+            TTS_MAX_SPOKEN_CHARS_PER_TURN,
+        )
 
     async with websockets.serve(
         handle_signaling,
