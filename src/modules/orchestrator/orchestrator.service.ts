@@ -17,6 +17,25 @@ import { AppError, toErrorPayload } from '../../common/types/errors';
 
 export type OrchestratorEmit = (event: ServerEvent) => void;
 
+type StructuredCaptureField = 'phone' | 'registration';
+
+interface StructuredCaptureState {
+  field: StructuredCaptureField;
+  value: string;
+  display: string;
+  rawTranscript: string;
+  attempts: number;
+  createdAt: string;
+}
+
+interface StructuredCaptureResult {
+  text: string;
+  providerLatencyMs: number;
+  toolResults: NormalizedToolResult[];
+  askedModelForTools: boolean;
+  toolsUsed: boolean;
+}
+
 @Injectable()
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
@@ -183,41 +202,61 @@ export class OrchestratorService {
           );
         }
       };
-      const deterministicToolCalls = this.buildDeterministicToolCalls(
-        trimmedTranscript,
-        task,
-        session,
-      );
-      const shouldAskModelForTools =
-        deterministicToolCalls.length > 0 ||
-        this.shouldUseTools(trimmedTranscript);
-      let toolsUsed = deterministicToolCalls.length > 0;
       const toolResultsForTurn: NormalizedToolResult[] = [];
       let finalText = '';
       let providerLatencyMs = 0;
+      let shouldAskModelForTools = false;
+      let toolsUsed = false;
 
-      if (deterministicToolCalls.length > 0) {
-        emitFirstToken('generate');
-        const final = await this.generateAfterTools(
-          sessionId,
-          turnId,
-          task,
-          messages,
-          "I'll check that.",
-          deterministicToolCalls,
-          emit,
-        );
-        finalText = final.text;
-        providerLatencyMs = final.providerLatencyMs;
-        toolResultsForTurn.push(...final.toolResults);
+      const structuredCapture = await this.handleStructuredCaptureTurn(
+        sessionId,
+        turnId,
+        trimmedTranscript,
+        task,
+        session,
+        messages,
+        emit,
+      );
+
+      if (structuredCapture) {
+        finalText = structuredCapture.text;
+        providerLatencyMs = structuredCapture.providerLatencyMs;
+        shouldAskModelForTools = structuredCapture.askedModelForTools;
+        toolsUsed = structuredCapture.toolsUsed;
+        toolResultsForTurn.push(...structuredCapture.toolResults);
       } else {
-        const initial = shouldAskModelForTools
-          ? await this.reasoning.generate({
+        const deterministicToolCalls = this.buildDeterministicToolCalls(
+          trimmedTranscript,
+          task,
+          session,
+        );
+        shouldAskModelForTools =
+          deterministicToolCalls.length > 0 ||
+          this.shouldUseTools(trimmedTranscript);
+        toolsUsed = deterministicToolCalls.length > 0;
+
+        if (deterministicToolCalls.length > 0) {
+          emitFirstToken('generate');
+          const final = await this.generateAfterTools(
+            sessionId,
+            turnId,
+            task,
+            messages,
+            "I'll check that.",
+            deterministicToolCalls,
+            emit,
+          );
+          finalText = final.text;
+          providerLatencyMs = final.providerLatencyMs;
+          toolResultsForTurn.push(...final.toolResults);
+        } else {
+          const initial = shouldAskModelForTools
+            ? await this.reasoning.generate({
               messages,
               tools,
               temperature: 0.2,
             })
-          : await this.reasoning.stream(
+            : await this.reasoning.stream(
               {
                 messages,
                 temperature: 0.15,
@@ -230,15 +269,15 @@ export class OrchestratorService {
                     emitFirstToken('stream');
                   }
 
-                  const chunks = this.extractSpeechChunks(
-                    streamedText,
-                    speechCursor,
-                    false,
-                  );
+                    const chunks = this.extractSpeechChunks(
+                      streamedText,
+                      speechCursor,
+                      false,
+                    );
 
-                  for (const chunk of chunks) {
-                    speechCursor = chunk.endIndex;
-                    emitSpeechTextChunk(chunk.text, false);
+                    for (const chunk of chunks) {
+                      speechCursor = chunk.endIndex;
+                      emitSpeechTextChunk(chunk.text, false);
 
                     if (
                       this.tts.isEnabled() &&
@@ -256,48 +295,49 @@ export class OrchestratorService {
               },
             );
 
-        finalText = initial.text;
-        providerLatencyMs = initial.latencyMs;
-        if (shouldAskModelForTools) {
-          emitFirstToken('generate');
-        }
+          finalText = initial.text;
+          providerLatencyMs = initial.latencyMs;
+          if (shouldAskModelForTools) {
+            emitFirstToken('generate');
+          }
 
-        if (!this.isTurnCurrent(sessionId, turnId)) {
-          this.logger.log(
-            `reasoning.skip_stale_after_initial session=${sessionId} turn=${turnId}`,
-          );
-          return;
-        }
+          if (!this.isTurnCurrent(sessionId, turnId)) {
+            this.logger.log(
+              `reasoning.skip_stale_after_initial session=${sessionId} turn=${turnId}`,
+            );
+            return;
+          }
 
-        const inferredToolCalls =
-          initial.toolCalls.length > 0
-            ? initial.toolCalls
-            : this.inferToolCallsFromAssistantText(
+          const inferredToolCalls =
+            initial.toolCalls.length > 0
+              ? initial.toolCalls
+              : this.inferToolCallsFromAssistantText(
                 initial.text,
                 task,
                 trimmedTranscript,
               );
 
-        if (inferredToolCalls.length > 0) {
-          toolsUsed = true;
-          if (initial.toolCalls.length === 0) {
-            this.logger.warn(
-              `reasoning.pseudo_tool_call session=${sessionId} turn=${turnId} calls=${inferredToolCalls.map((call) => call.name).join(',')}`,
-            );
-          }
+          if (inferredToolCalls.length > 0) {
+            toolsUsed = true;
+            if (initial.toolCalls.length === 0) {
+              this.logger.warn(
+                `reasoning.pseudo_tool_call session=${sessionId} turn=${turnId} calls=${inferredToolCalls.map((call) => call.name).join(',')}`,
+              );
+            }
 
-          const final = await this.generateAfterTools(
-            sessionId,
-            turnId,
-            task,
-            messages,
-            initial.toolCalls.length > 0 ? initial.text : "I'll check that.",
-            inferredToolCalls,
-            emit,
-          );
-          finalText = final.text;
-          providerLatencyMs += final.providerLatencyMs;
-          toolResultsForTurn.push(...final.toolResults);
+            const final = await this.generateAfterTools(
+              sessionId,
+              turnId,
+              task,
+              messages,
+              initial.toolCalls.length > 0 ? initial.text : "I'll check that.",
+              inferredToolCalls,
+              emit,
+            );
+            finalText = final.text;
+            providerLatencyMs += final.providerLatencyMs;
+            toolResultsForTurn.push(...final.toolResults);
+          }
         }
       }
 
@@ -401,6 +441,231 @@ export class OrchestratorService {
     } catch {
       return false;
     }
+  }
+
+  private async handleStructuredCaptureTurn(
+    sessionId: string,
+    turnId: string,
+    transcript: string,
+    task: TaskConfig,
+    session: SessionState,
+    messages: ChatMessage[],
+    emit: OrchestratorEmit,
+  ): Promise<StructuredCaptureResult | undefined> {
+    const pending = this.getStructuredCapture(session);
+
+    if (pending) {
+      if (this.isAffirmative(transcript)) {
+        this.clearStructuredCapture(session);
+        const toolName =
+          pending.field === 'phone'
+            ? 'find_customer_by_phone'
+            : 'find_vehicle_by_rego';
+        const args =
+          pending.field === 'phone'
+            ? { phone: pending.value }
+            : { registration: pending.value };
+        const final = await this.generateAfterTools(
+          sessionId,
+          turnId,
+          task,
+          messages,
+          "I'll check that.",
+          [this.createToolCall(toolName, args)],
+          emit,
+        );
+
+        return {
+          text: final.text,
+          providerLatencyMs: final.providerLatencyMs,
+          toolResults: final.toolResults,
+          askedModelForTools: true,
+          toolsUsed: true,
+        };
+      }
+
+      const correction = this.detectStructuredCaptureCandidate(
+        transcript,
+        session,
+        pending.field,
+      );
+      if (correction) {
+        this.setStructuredCapture(session, correction);
+        return {
+          text: this.confirmStructuredCaptureText(correction),
+          providerLatencyMs: 0,
+          toolResults: [],
+          askedModelForTools: false,
+          toolsUsed: false,
+        };
+      }
+
+      if (this.isNegative(transcript)) {
+        pending.attempts += 1;
+        this.setStructuredCapture(session, pending);
+        return {
+          text:
+            pending.field === 'phone'
+              ? 'No problem. Please repeat the phone number one digit at a time.'
+              : 'No problem. Please repeat the registration one character at a time.',
+          providerLatencyMs: 0,
+          toolResults: [],
+          askedModelForTools: false,
+          toolsUsed: false,
+        };
+      }
+
+      return {
+        text: `Just to confirm, I heard ${pending.display}. Is that correct?`,
+        providerLatencyMs: 0,
+        toolResults: [],
+        askedModelForTools: false,
+        toolsUsed: false,
+      };
+    }
+
+    const detected = this.detectStructuredCaptureCandidate(transcript, session);
+    if (!detected) {
+      return undefined;
+    }
+
+    this.setStructuredCapture(session, detected);
+    return {
+      text: this.confirmStructuredCaptureText(detected),
+      providerLatencyMs: 0,
+      toolResults: [],
+      askedModelForTools: false,
+      toolsUsed: false,
+    };
+  }
+
+  private detectStructuredCaptureCandidate(
+    transcript: string,
+    session: SessionState,
+    forcedField?: StructuredCaptureField,
+  ): StructuredCaptureState | undefined {
+    const context = this.getStructuredCaptureContext(transcript, session);
+
+    if (forcedField === 'phone' || (!forcedField && context.phone)) {
+      const phone = this.parseSpokenAustralianPhone(transcript);
+      if (phone.ok) {
+        return {
+          field: 'phone',
+          value: phone.e164 ?? '',
+          display: this.spokenPhoneForConfirmation(phone.nationalDigits),
+          rawTranscript: transcript,
+          attempts: 0,
+          createdAt: nowIso(),
+        };
+      }
+
+      if (phone.incomplete && context.phone) {
+        return undefined;
+      }
+    }
+
+    if (
+      forcedField === 'registration' ||
+      (!forcedField && context.registration)
+    ) {
+      const registration = this.parseSpokenRegistration(transcript, context);
+      if (registration) {
+        return {
+          field: 'registration',
+          value: registration,
+          display: this.spokenRegistrationForConfirmation(registration),
+          rawTranscript: transcript,
+          attempts: 0,
+          createdAt: nowIso(),
+        };
+      }
+    }
+
+    return undefined;
+  }
+
+  private getStructuredCaptureContext(
+    transcript: string,
+    session: SessionState,
+  ): { phone: boolean; registration: boolean } {
+    const lastAssistant =
+      [...session.history].reverse().find((item) => item.role === 'assistant')
+        ?.text ?? '';
+    const combined = `${lastAssistant} ${transcript}`.toLowerCase();
+
+    return {
+      phone: /\b(phone|mobile|number|contact number)\b/.test(combined),
+      registration: /\b(rego|registration|plate|licen[cs]e plate)\b/.test(
+        combined,
+      ),
+    };
+  }
+
+  private getStructuredCapture(
+    session: SessionState,
+  ): StructuredCaptureState | undefined {
+    const capture = session.metadata?.structuredCapture;
+    if (!this.isRecord(capture)) {
+      return undefined;
+    }
+
+    if (
+      (capture.field === 'phone' || capture.field === 'registration') &&
+      typeof capture.value === 'string' &&
+      typeof capture.display === 'string' &&
+      typeof capture.rawTranscript === 'string'
+    ) {
+      return {
+        field: capture.field,
+        value: capture.value,
+        display: capture.display,
+        rawTranscript: capture.rawTranscript,
+        attempts: typeof capture.attempts === 'number' ? capture.attempts : 0,
+        createdAt:
+          typeof capture.createdAt === 'string' ? capture.createdAt : nowIso(),
+      };
+    }
+
+    return undefined;
+  }
+
+  private setStructuredCapture(
+    session: SessionState,
+    capture: StructuredCaptureState,
+  ): void {
+    session.metadata = {
+      ...(session.metadata ?? {}),
+      structuredCapture: capture,
+    };
+  }
+
+  private clearStructuredCapture(session: SessionState): void {
+    if (!session.metadata) {
+      return;
+    }
+
+    const { structuredCapture: _structuredCapture, ...rest } = session.metadata;
+    session.metadata = rest;
+  }
+
+  private confirmStructuredCaptureText(
+    capture: StructuredCaptureState,
+  ): string {
+    return capture.field === 'phone'
+      ? `I heard ${capture.display}. Is that correct?`
+      : `I heard registration ${capture.display}. Is that correct?`;
+  }
+
+  private isAffirmative(text: string): boolean {
+    return /\b(yes|yeah|yep|correct|right|that'?s right|that is right|exactly|confirmed|confirm)\b/i.test(
+      text,
+    );
+  }
+
+  private isNegative(text: string): boolean {
+    return /\b(no|nope|nah|incorrect|wrong|not right|that'?s wrong|try again)\b/i.test(
+      text,
+    );
   }
 
   private async generateAfterTools(
@@ -567,26 +832,6 @@ export class OrchestratorService {
 
     if (
       calls.length === 0 &&
-      this.isAllowedTool(task, 'find_customer_by_phone')
-    ) {
-      const phone = this.extractAustralianPhoneCandidate(transcript);
-      if (phone) {
-        calls.push(this.createToolCall('find_customer_by_phone', { phone }));
-      }
-    }
-
-    if (
-      calls.length === 0 &&
-      this.isAllowedTool(task, 'find_vehicle_by_rego')
-    ) {
-      const registration = this.extractRegistrationCandidate(transcript);
-      if (registration) {
-        calls.push(this.createToolCall('find_vehicle_by_rego', { registration }));
-      }
-    }
-
-    if (
-      calls.length === 0 &&
       this.isAllowedTool(task, 'check_booking_availability')
     ) {
       const serviceType = this.inferServiceType(
@@ -709,7 +954,11 @@ export class OrchestratorService {
       this.createToolCall(
         name,
         this.normalizeJsonValue(
-          parsed.arguments ?? parsed.args ?? parsed.input ?? parsed.parameters ?? {},
+          parsed.arguments ??
+          parsed.args ??
+          parsed.input ??
+          parsed.parameters ??
+          {},
         ),
       ),
     ];
@@ -813,7 +1062,9 @@ export class OrchestratorService {
     return undefined;
   }
 
-  private inferPreferredTimeOfDay(text: string): 'morning' | 'afternoon' | 'any' {
+  private inferPreferredTimeOfDay(
+    text: string,
+  ): 'morning' | 'afternoon' | 'any' {
     const lower = text.toLowerCase();
     if (/\bmorning\b/.test(lower)) {
       return 'morning';
@@ -826,11 +1077,284 @@ export class OrchestratorService {
     return 'any';
   }
 
-  private extractAustralianPhoneCandidate(text: string): string | undefined {
-    const candidates = text.match(/(?:\+?61|0)[\d\s().-]{8,18}/g) ?? [];
-    return candidates.find((candidate) =>
-      /^(?:\+?61|0)\D*\d/.test(candidate.trim()),
+  private parseSpokenAustralianPhone(text: string): {
+    ok: boolean;
+    e164?: string;
+    nationalDigits?: string;
+    incomplete?: boolean;
+  } {
+    const directCandidates = text.match(/(?:\+?61|0)[\d\s().-]{8,18}/g) ?? [];
+    for (const candidate of directCandidates) {
+      const result = this.validatePhoneDigits(candidate);
+      if (result.ok) {
+        return result;
+      }
+    }
+
+    const digits = this.extractSpokenDigits(text).join('');
+    const result = this.validatePhoneDigits(digits);
+    if (result.ok) {
+      return result;
+    }
+
+    return {
+      ok: false,
+      incomplete: digits.length >= 4 && digits.length < 10,
+    };
+  }
+
+  private validatePhoneDigits(input: string): {
+    ok: boolean;
+    e164?: string;
+    nationalDigits?: string;
+  } {
+    let digits = input.replace(/\D/g, '');
+
+    if (digits.startsWith('61')) {
+      digits = `0${digits.slice(2)}`;
+    }
+
+    if (
+      digits.length !== 10 ||
+      (!/^04\d{8}$/.test(digits) && !/^0[2378]\d{8}$/.test(digits))
+    ) {
+      return { ok: false };
+    }
+
+    return {
+      ok: true,
+      e164: `+61${digits.slice(1)}`,
+      nationalDigits: digits,
+    };
+  }
+
+  private extractSpokenDigits(text: string): string[] {
+    const tokens = text.toLowerCase().match(/[a-z]+|\d+/g) ?? [];
+    const digits: string[] = [];
+    let repeatCount = 1;
+
+    for (const token of tokens) {
+      if (token === 'double') {
+        repeatCount = 2;
+        continue;
+      }
+
+      if (token === 'triple') {
+        repeatCount = 3;
+        continue;
+      }
+
+      const digit = this.spokenDigit(token);
+      if (digit !== undefined) {
+        for (let index = 0; index < repeatCount; index += 1) {
+          digits.push(digit);
+        }
+        repeatCount = 1;
+        continue;
+      }
+
+      if (/^\d+$/.test(token)) {
+        for (const item of token) {
+          digits.push(item);
+        }
+        repeatCount = 1;
+        continue;
+      }
+
+      repeatCount = 1;
+    }
+
+    return digits;
+  }
+
+  private spokenDigit(token: string): string | undefined {
+    const digits: Record<string, string> = {
+      zero: '0',
+      oh: '0',
+      o: '0',
+      one: '1',
+      won: '1',
+      two: '2',
+      too: '2',
+      to: '2',
+      three: '3',
+      tree: '3',
+      four: '4',
+      for: '4',
+      five: '5',
+      six: '6',
+      seven: '7',
+      eight: '8',
+      ate: '8',
+      nine: '9',
+      niner: '9',
+    };
+
+    return digits[token];
+  }
+
+  private spokenPhoneForConfirmation(nationalDigits?: string): string {
+    const words = [...(nationalDigits ?? '')].map((digit) =>
+      this.digitWord(digit),
     );
+    return [
+      words.slice(0, 4).join(' '),
+      words.slice(4, 7).join(' '),
+      words.slice(7).join(' '),
+    ]
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  private digitWord(digit: string): string {
+    const words: Record<string, string> = {
+      '0': 'zero',
+      '1': 'one',
+      '2': 'two',
+      '3': 'three',
+      '4': 'four',
+      '5': 'five',
+      '6': 'six',
+      '7': 'seven',
+      '8': 'eight',
+      '9': 'nine',
+    };
+
+    return words[digit] ?? digit;
+  }
+
+  private parseSpokenRegistration(
+    text: string,
+    context: { registration: boolean },
+  ): string | undefined {
+    const direct = this.extractRegistrationCandidate(text);
+    if (direct) {
+      return direct.replace(/[^a-z0-9]/gi, '').toUpperCase();
+    }
+
+    if (!context.registration) {
+      return undefined;
+    }
+
+    const afterCue =
+      text.split(/\b(?:rego|registration|plate|licen[cs]e plate)\b/i).pop() ??
+      text;
+    const tokens = afterCue.toLowerCase().match(/[a-z]+|\d+/g) ?? [];
+    const parts: string[] = [];
+    let repeatCount = 1;
+
+    for (const token of tokens) {
+      if (token === 'double') {
+        repeatCount = 2;
+        continue;
+      }
+
+      if (token === 'triple') {
+        repeatCount = 3;
+        continue;
+      }
+
+      const part = this.spokenRegistrationPart(token);
+      if (part) {
+        for (let index = 0; index < repeatCount; index += 1) {
+          parts.push(part);
+        }
+        repeatCount = 1;
+        continue;
+      }
+
+      if (/^[a-z0-9]{2,8}$/i.test(token) && /\d/.test(token)) {
+        parts.push(token.toUpperCase());
+      }
+
+      repeatCount = 1;
+    }
+
+    const registration = parts.join('').replace(/[^A-Z0-9]/g, '');
+    return registration.length >= 2 && registration.length <= 10
+      ? registration
+      : undefined;
+  }
+
+  private spokenRegistrationPart(token: string): string | undefined {
+    const digit = this.spokenDigit(token);
+    if (digit !== undefined && token !== 'oh' && token !== 'o') {
+      return digit;
+    }
+
+    const letters: Record<string, string> = {
+      a: 'A',
+      ay: 'A',
+      b: 'B',
+      be: 'B',
+      bee: 'B',
+      c: 'C',
+      see: 'C',
+      sea: 'C',
+      d: 'D',
+      dee: 'D',
+      e: 'E',
+      f: 'F',
+      eff: 'F',
+      g: 'G',
+      gee: 'G',
+      h: 'H',
+      aitch: 'H',
+      haitch: 'H',
+      i: 'I',
+      eye: 'I',
+      j: 'J',
+      jay: 'J',
+      k: 'K',
+      kay: 'K',
+      l: 'L',
+      el: 'L',
+      m: 'M',
+      em: 'M',
+      n: 'N',
+      en: 'N',
+      o: 'O',
+      oh: 'O',
+      p: 'P',
+      pea: 'P',
+      q: 'Q',
+      queue: 'Q',
+      r: 'R',
+      are: 'R',
+      s: 'S',
+      ess: 'S',
+      t: 'T',
+      tea: 'T',
+      u: 'U',
+      you: 'U',
+      v: 'V',
+      vee: 'V',
+      w: 'W',
+      doubleyou: 'W',
+      x: 'X',
+      ex: 'X',
+      y: 'Y',
+      why: 'Y',
+      z: 'Z',
+      zed: 'Z',
+      zee: 'Z',
+    };
+
+    if (/^[a-z]$/i.test(token)) {
+      return token.toUpperCase();
+    }
+
+    if (/^\d$/.test(token)) {
+      return token;
+    }
+
+    return letters[token];
+  }
+
+  private spokenRegistrationForConfirmation(registration: string): string {
+    return [...registration]
+      .map((part) => (/^\d$/.test(part) ? this.digitWord(part) : part))
+      .join(' ');
   }
 
   private extractRegistrationCandidate(text: string): string | undefined {
@@ -875,7 +1399,7 @@ export class OrchestratorService {
     ) {
       this.logger.warn('response.grounded_claim_blocked reason=lookup_claim');
       return this.hasRegistrationOrPhone(transcript)
-        ? "I need to check that in the system first. Could you repeat the phone number or registration once more?"
+        ? 'I need to check that in the system first. Could you repeat the phone number or registration once more?'
         : "I need to check that in the system first. What's the phone number or registration?";
     }
 
@@ -908,7 +1432,7 @@ export class OrchestratorService {
       ])
     ) {
       this.logger.warn('response.grounded_claim_blocked reason=hours_claim');
-      return "I need to check the workshop hours first. Which day would you like me to check?";
+      return 'I need to check the workshop hours first. Which day would you like me to check?';
     }
 
     return text;
@@ -956,12 +1480,14 @@ export class OrchestratorService {
 
   private hasRegistrationOrPhone(text: string): boolean {
     return Boolean(
-      this.extractAustralianPhoneCandidate(text) ||
-        this.extractRegistrationCandidate(text),
+      this.parseSpokenAustralianPhone(text).ok ||
+      this.extractRegistrationCandidate(text),
     );
   }
 
-  private parseJsonObjectFromText(text: string): Record<string, unknown> | undefined {
+  private parseJsonObjectFromText(
+    text: string,
+  ): Record<string, unknown> | undefined {
     const trimmed = text.trim();
     const candidate = trimmed.startsWith('{')
       ? trimmed
@@ -1018,7 +1544,9 @@ export class OrchestratorService {
     return value;
   }
 
-  private compactObject(input: Record<string, unknown>): Record<string, unknown> {
+  private compactObject(
+    input: Record<string, unknown>,
+  ): Record<string, unknown> {
     return Object.fromEntries(
       Object.entries(input).filter(([, value]) => value !== undefined),
     );
@@ -1032,11 +1560,7 @@ export class OrchestratorService {
     return task.allowedTools.includes(name);
   }
 
-  private createToolCall(
-    name: string,
-    args: unknown,
-    id?: string,
-  ): ToolCall {
+  private createToolCall(name: string, args: unknown, id?: string): ToolCall {
     return {
       id: id ?? randomUUID(),
       name,
