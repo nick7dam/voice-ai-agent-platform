@@ -1725,14 +1725,20 @@ async function startWebRtcVoice() {
       10000,
     );
   });
+  let answerTimer = null;
   const answerWait = new Promise((resolve, reject) => {
     answerResolve = resolve;
     answerReject = reject;
-    window.setTimeout(
-      () => reject(new Error('Timed out waiting for WebRTC answer.')),
-      10000,
-    );
   });
+  const startAnswerTimeout = () => {
+    if (answerTimer) {
+      window.clearTimeout(answerTimer);
+    }
+    answerTimer = window.setTimeout(
+      () => answerReject?.(new Error('Timed out waiting for WebRTC answer.')),
+      30000,
+    );
+  };
 
   signalSocket.addEventListener('message', (message) => {
     const envelope = handleWebRtcEnvelope(message);
@@ -1742,6 +1748,10 @@ async function startWebRtcVoice() {
     }
 
     if (envelope.type === 'answer') {
+      if (answerTimer) {
+        window.clearTimeout(answerTimer);
+        answerTimer = null;
+      }
       answerResolve(envelope);
     }
 
@@ -1754,6 +1764,10 @@ async function startWebRtcVoice() {
   });
 
   signalSocket.addEventListener('close', (event) => {
+    if (answerTimer) {
+      window.clearTimeout(answerTimer);
+      answerTimer = null;
+    }
     const reason = event.reason
       ? ` ${event.reason}`
       : event.wasClean
@@ -1896,6 +1910,7 @@ async function startWebRtcVoice() {
     }),
   );
   logWebRtcSetup('offer.sent');
+  startAnswerTimeout();
 
   const answer = await answerWait;
   logWebRtcSetup('answer.received');
