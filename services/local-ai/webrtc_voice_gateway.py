@@ -43,6 +43,7 @@ STT_DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_STT_COMPUTE_TYPE = "float16" if STT_DEVICE == "cuda" else "int8"
 STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
+STT_PRELOAD = env_bool("LOCAL_STT_PRELOAD", False)
 
 TTS_ENGINE = os.getenv("LOCAL_TTS_ENGINE", "kokoro").strip().lower()
 TTS_MODEL_NAME = os.getenv("LOCAL_TTS_MODEL", "hexgrad/Kokoro-82M")
@@ -51,6 +52,8 @@ TTS_LANG_CODE = os.getenv("LOCAL_TTS_LANG_CODE", "a")
 TTS_SPEED = float(os.getenv("LOCAL_TTS_SPEED", "1"))
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 TTS_SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
+TTS_PRELOAD = env_bool("LOCAL_TTS_PRELOAD", False)
+TTS_WARMUP_TEXT = os.getenv("LOCAL_TTS_WARMUP_TEXT", "Ready.").strip()
 TTS_ENABLED = env_bool("VOICE_GATEWAY_TTS_ENABLED", True)
 GREETING_ENABLED = env_bool("VOICE_GATEWAY_GREETING_ENABLED", True)
 GREETING_TEXT = os.getenv(
@@ -99,6 +102,10 @@ WEBRTC_TURN_URLS = os.getenv("WEBRTC_TURN_URLS", "").strip()
 WEBRTC_TURN_USERNAME = os.getenv("WEBRTC_TURN_USERNAME", "").strip()
 WEBRTC_TURN_CREDENTIAL = os.getenv("WEBRTC_TURN_CREDENTIAL", "").strip()
 WEBRTC_ICE_TRANSPORT_POLICY = os.getenv("WEBRTC_ICE_TRANSPORT_POLICY", "all").strip()
+WEBRTC_SERVER_ICE_SERVERS_JSON = os.getenv(
+    "WEBRTC_SERVER_ICE_SERVERS_JSON", ""
+).strip()
+WEBRTC_SERVER_USE_BROWSER_ICE = env_bool("WEBRTC_SERVER_USE_BROWSER_ICE", False)
 
 logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
@@ -141,24 +148,7 @@ def normalized_browser_ice_server(raw: Any) -> Optional[Dict[str, Any]]:
 
 def browser_ice_servers() -> List[Dict[str, Any]]:
     if WEBRTC_ICE_SERVERS_JSON:
-        try:
-            raw_servers = json.loads(WEBRTC_ICE_SERVERS_JSON)
-        except json.JSONDecodeError as exc:
-            logger.warning("voice.ice.invalid_json error=%s", exc)
-            return []
-
-        if not isinstance(raw_servers, list):
-            logger.warning("voice.ice.invalid_json_shape expected=list")
-            return []
-
-        return [
-            server
-            for server in (
-                normalized_browser_ice_server(raw_server)
-                for raw_server in raw_servers
-            )
-            if server is not None
-        ]
+        return parse_ice_servers_json(WEBRTC_ICE_SERVERS_JSON, "voice.ice")
 
     servers: List[Dict[str, Any]] = []
     stun_urls = comma_list(WEBRTC_STUN_URLS)
@@ -180,10 +170,46 @@ def browser_ice_servers() -> List[Dict[str, Any]]:
     return servers
 
 
+def parse_ice_servers_json(value: str, log_prefix: str) -> List[Dict[str, Any]]:
+    if value:
+        try:
+            raw_servers = json.loads(value)
+        except json.JSONDecodeError as exc:
+            logger.warning("%s.invalid_json error=%s", log_prefix, exc)
+            return []
+
+        if not isinstance(raw_servers, list):
+            logger.warning("%s.invalid_json_shape expected=list", log_prefix)
+            return []
+
+        return [
+            server
+            for server in (
+                normalized_browser_ice_server(raw_server)
+                for raw_server in raw_servers
+            )
+            if server is not None
+        ]
+
+    return []
+
+
+def server_ice_servers() -> List[Dict[str, Any]]:
+    if WEBRTC_SERVER_ICE_SERVERS_JSON:
+        return parse_ice_servers_json(
+            WEBRTC_SERVER_ICE_SERVERS_JSON, "voice.server_ice"
+        )
+
+    if WEBRTC_SERVER_USE_BROWSER_ICE:
+        return browser_ice_servers()
+
+    return []
+
+
 def aiortc_ice_servers() -> List[RTCIceServer]:
     servers: List[RTCIceServer] = []
 
-    for server in browser_ice_servers():
+    for server in server_ice_servers():
         servers.append(
             RTCIceServer(
                 urls=server["urls"],
@@ -282,6 +308,12 @@ def get_chatterbox_model() -> Any:
         ) from exc
 
     started_at = time.perf_counter()
+    logger.info(
+        "voice.tts.chatterbox.load.start model=%s device=%s audioPrompt=%s",
+        CHATTERBOX_MODEL_NAME,
+        resolve_tts_device(),
+        bool(CHATTERBOX_AUDIO_PROMPT_PATH),
+    )
     model = ChatterboxTurboTTS.from_pretrained(device=resolve_tts_device())
     audio_prompt = CHATTERBOX_AUDIO_PROMPT_PATH
 
@@ -562,6 +594,14 @@ def iter_tts_audio(text: str):
 
     if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}:
         model = get_chatterbox_model()
+        started_at = time.perf_counter()
+        logger.info(
+            "voice.tts.chatterbox.generate.start chars=%d temperature=%.2f topP=%.2f topK=%d",
+            len(speech_text),
+            CHATTERBOX_TEMPERATURE,
+            CHATTERBOX_TOP_P,
+            CHATTERBOX_TOP_K,
+        )
         with torch.inference_mode():
             audio = model.generate(
                 speech_text,
@@ -571,11 +611,19 @@ def iter_tts_audio(text: str):
                 temperature=CHATTERBOX_TEMPERATURE,
             )
         audio_array = audio_to_float32(audio)
-        yield resample_float32(
+        audio_array = resample_float32(
             audio_array,
             int(getattr(model, "sr", TTS_SAMPLE_RATE)),
             TTS_SAMPLE_RATE,
         )
+        logger.info(
+            "voice.tts.chatterbox.generate.end chars=%d samples=%d audioSeconds=%.2f latencyMs=%d",
+            len(speech_text),
+            int(audio_array.size),
+            audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
+            elapsed_ms(started_at),
+        )
+        yield audio_array
         return
 
     raise RuntimeError(
@@ -929,6 +977,11 @@ class VoiceSession:
         await self.control.connect()
 
     async def accept_offer(self, sdp: str, sdp_type: str) -> None:
+        logger.info(
+            "voice.webrtc.answer.start browserIceServers=%d serverIceServers=%d",
+            len(browser_ice_servers()),
+            len(server_ice_servers()),
+        )
         self.pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=aiortc_ice_servers())
         )
@@ -961,9 +1014,13 @@ class VoiceSession:
                 asyncio.create_task(self.play_greeting())
 
         await self.pc.setRemoteDescription(RTCSessionDescription(sdp=sdp, type=sdp_type))
+        logger.info("voice.webrtc.remote_description.set")
         answer = await self.pc.createAnswer()
+        logger.info("voice.webrtc.answer.created")
         await self.pc.setLocalDescription(answer)
+        logger.info("voice.webrtc.local_description.set")
         await wait_for_ice_gathering(self.pc)
+        logger.info("voice.webrtc.ice_gathering.done state=%s", self.pc.iceGatheringState)
         await send_json(
             self.signaling_ws,
             {
@@ -972,6 +1029,7 @@ class VoiceSession:
                 "sdpType": self.pc.localDescription.type,
             },
         )
+        logger.info("voice.webrtc.answer.sent")
 
     async def handle_datachannel_message(self, message: Any) -> None:
         try:
@@ -1339,6 +1397,22 @@ class VoiceSession:
 
             try:
                 await self.synthesize_to_track(turn_id, text, generation)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "voice.tts.error turn=%s chars=%d error=%s",
+                    turn_id,
+                    len(text),
+                    exc,
+                )
+                await self.send_browser_event(
+                    {
+                        "type": "gateway.error",
+                        "timestamp": now_iso(),
+                        "payload": {"message": f"Local TTS failed: {exc}"},
+                    }
+                )
             finally:
                 self.tts_queue.task_done()
                 if self.tts_queue.empty():
@@ -1528,6 +1602,44 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
         logger.info("voice.signaling.closed")
 
 
+def preload_stt_model() -> None:
+    started_at = time.perf_counter()
+    get_whisper_model()
+    logger.info("voice.stt.preload.end latencyMs=%d", elapsed_ms(started_at))
+
+
+def preload_tts_model() -> None:
+    if not TTS_ENABLED:
+        return
+
+    started_at = time.perf_counter()
+    text = TTS_WARMUP_TEXT or "Ready."
+    chunks = 0
+    samples = 0
+    for audio in iter_tts_audio(text):
+        chunks += 1
+        samples += int(audio.size)
+
+    logger.info(
+        "voice.tts.preload.end engine=%s chars=%d chunks=%d audioSeconds=%.2f latencyMs=%d",
+        TTS_ENGINE,
+        len(text),
+        chunks,
+        samples / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
+        elapsed_ms(started_at),
+    )
+
+
+async def preload_models() -> None:
+    try:
+        if STT_PRELOAD:
+            await asyncio.to_thread(preload_stt_model)
+        if TTS_PRELOAD:
+            await asyncio.to_thread(preload_tts_model)
+    except Exception as exc:
+        logger.exception("voice.preload.error error=%s", exc)
+
+
 async def main() -> None:
     ice_servers = browser_ice_servers()
     active_tts_model = (
@@ -1556,6 +1668,8 @@ async def main() -> None:
         PORT,
         max_size=16 * 1024 * 1024,
     ):
+        if STT_PRELOAD or TTS_PRELOAD:
+            asyncio.create_task(preload_models())
         await asyncio.Future()
 
 
