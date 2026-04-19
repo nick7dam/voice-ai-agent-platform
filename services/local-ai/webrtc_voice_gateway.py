@@ -117,6 +117,14 @@ BARGE_THRESHOLD_MULTIPLIER = float(
 BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "140"))
 BARGE_START_GRACE_MS = int(os.getenv("VOICE_VAD_BARGE_START_GRACE_MS", "350"))
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
+TRANSCRIPT_COALESCING_ENABLED = env_bool("VOICE_TRANSCRIPT_COALESCING_ENABLED", True)
+TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "650"))
+TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS = int(
+    os.getenv("VOICE_TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS", "4000")
+)
+TRANSCRIPT_MAX_COALESCE_MS = int(os.getenv("VOICE_TRANSCRIPT_MAX_COALESCE_MS", "12000"))
+TRANSCRIPT_MIN_FINAL_WORDS = int(os.getenv("VOICE_TRANSCRIPT_MIN_FINAL_WORDS", "5"))
+STT_QUEUE_MAX_SIZE = max(1, int(os.getenv("VOICE_STT_QUEUE_MAX_SIZE", "6")))
 
 WEBRTC_ICE_SERVERS_JSON = os.getenv("WEBRTC_ICE_SERVERS_JSON", "").strip()
 WEBRTC_STUN_URLS = os.getenv("WEBRTC_STUN_URLS", "").strip()
@@ -931,6 +939,87 @@ class TurnLatency:
     first_audio_at: Optional[float] = None
 
 
+@dataclass
+class PendingTranscript:
+    parts: list[str]
+    metric: TurnLatency
+    first_part_at: float
+    structured: bool = False
+
+
+NUMBER_WORDS = {
+    "zero",
+    "oh",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "double",
+    "triple",
+}
+
+
+def transcript_word_count(text: str) -> int:
+    return len(re.findall(r"\b[\w']+\b", text))
+
+
+def looks_like_structured_transcript(text: str) -> bool:
+    lower = text.lower()
+    if re.search(
+        r"\b(phone|mobile|number|rego|registration|plate|licen[cs]e|vin|address|postcode)\b",
+        lower,
+    ):
+        return True
+
+    digit_count = len(re.findall(r"\d", lower))
+    if digit_count >= 2:
+        return True
+
+    words = re.findall(r"\b[a-z]+\b", lower)
+    number_word_count = sum(1 for word in words if word in NUMBER_WORDS)
+    return number_word_count >= 2
+
+
+def transcript_looks_complete(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    if looks_like_structured_transcript(stripped):
+        return False
+
+    if transcript_word_count(stripped) < TRANSCRIPT_MIN_FINAL_WORDS:
+        return False
+
+    return bool(re.search(r"[.!?]$", stripped))
+
+
+def clean_transcript_fragment(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    return text
+
+
+def join_transcript_fragments(parts: List[str]) -> str:
+    cleaned: List[str] = []
+    for index, part in enumerate(parts):
+        fragment = clean_transcript_fragment(part)
+        if not fragment:
+            continue
+        if index < len(parts) - 1:
+            fragment = fragment.rstrip(" .!?;:")
+        cleaned.append(fragment)
+
+    return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
 class VoiceActivityDetector:
     def __init__(self, session: "VoiceSession"):
         self.session = session
@@ -1017,6 +1106,7 @@ class VoiceActivityDetector:
         else:
             preroll_chunks = [chunk for _, chunk in self.preroll[:-1]]
 
+        await self.session.note_user_speech_started()
         self.current_turn = VadTurn(
             chunks=preroll_chunks,
             started_at=now,
@@ -1066,6 +1156,7 @@ class VoiceActivityDetector:
                     },
                 }
             )
+            await self.session.resume_pending_transcript_commit("discarded_speech")
             return
 
         await self.session.enqueue_user_audio(samples)
@@ -1169,7 +1260,9 @@ class VoiceSession:
         self.closed = False
         self.call_ending = False
         self.user_turn_generation = 0
-        self.stt_queue: asyncio.Queue[Tuple[int, np.ndarray]] = asyncio.Queue(maxsize=1)
+        self.stt_queue: asyncio.Queue[Tuple[int, np.ndarray]] = asyncio.Queue(
+            maxsize=STT_QUEUE_MAX_SIZE
+        )
         self.tts_queue: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
         self.tts_worker_task = asyncio.create_task(self.tts_worker())
         self.stt_worker_task = asyncio.create_task(self.stt_worker())
@@ -1186,6 +1279,8 @@ class VoiceSession:
         self.turn_latencies: Dict[str, TurnLatency] = {}
         self.greeting_sent = False
         self.pending_end_turn_id: Optional[str] = None
+        self.pending_transcript: Optional[PendingTranscript] = None
+        self.pending_transcript_task: Optional[asyncio.Task[None]] = None
 
     async def start_control(self, task_key: str) -> None:
         self.control = NestControlClient(self, task_key)
@@ -1410,6 +1505,49 @@ class VoiceSession:
 
         return False
 
+    async def note_user_speech_started(self) -> None:
+        if self.pending_transcript is None:
+            return
+
+        if self.pending_transcript_task:
+            self.pending_transcript_task.cancel()
+            self.pending_transcript_task = None
+
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcript.holding",
+                "timestamp": now_iso(),
+                "payload": {
+                    "text": join_transcript_fragments(self.pending_transcript.parts),
+                    "parts": len(self.pending_transcript.parts),
+                    "reason": "user_continued_speaking",
+                },
+            }
+        )
+
+    async def resume_pending_transcript_commit(self, reason: str) -> None:
+        if self.pending_transcript is None or self.pending_transcript_task is not None:
+            return
+
+        text = join_transcript_fragments(self.pending_transcript.parts)
+        if not text:
+            return
+
+        delay_ms = self.transcript_commit_delay_ms(text)
+        self.schedule_pending_transcript_commit(delay_ms)
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcript.pending_resumed",
+                "timestamp": now_iso(),
+                "payload": {
+                    "text": text,
+                    "parts": len(self.pending_transcript.parts),
+                    "reason": reason,
+                    "delayMs": delay_ms,
+                },
+            }
+        )
+
     def begin_turn_latency(self) -> TurnLatency:
         self.local_turn_sequence += 1
         return TurnLatency(
@@ -1425,7 +1563,7 @@ class VoiceSession:
         generation = self.user_turn_generation
         dropped = 0
 
-        while not self.stt_queue.empty():
+        while self.stt_queue.full():
             try:
                 self.stt_queue.get_nowait()
                 self.stt_queue.task_done()
@@ -1435,7 +1573,7 @@ class VoiceSession:
 
         if dropped:
             logger.info(
-                "voice.stt.drop_queued dropped=%d generation=%d",
+                "voice.stt.drop_queued_overflow dropped=%d generation=%d",
                 dropped,
                 generation,
             )
@@ -1457,7 +1595,11 @@ class VoiceSession:
             generation, samples = await self.stt_queue.get()
 
             try:
-                if generation != self.user_turn_generation or self.call_ending:
+                stale_generation = (
+                    not TRANSCRIPT_COALESCING_ENABLED
+                    and generation != self.user_turn_generation
+                )
+                if stale_generation or self.call_ending:
                     logger.info(
                         "voice.stt.skip_queued_stale generation=%d currentGeneration=%d",
                         generation,
@@ -1559,7 +1701,10 @@ class VoiceSession:
             elapsed_ms(started_at),
         )
 
-        if generation != self.user_turn_generation or self.call_ending or self.closed:
+        stale_generation = (
+            not TRANSCRIPT_COALESCING_ENABLED and generation != self.user_turn_generation
+        )
+        if stale_generation or self.call_ending or self.closed:
             logger.info(
                 "voice.stt.skip_stale_result generation=%d currentGeneration=%d",
                 generation,
@@ -1585,12 +1730,123 @@ class VoiceSession:
                     "payload": {"latencyMs": latency_ms},
                 }
             )
+            await self.resume_pending_transcript_commit("empty_transcription")
             return
 
         if self.control:
-            metric.text_sent_at = time.perf_counter()
-            self.pending_turn_latencies.append(metric)
-            await self.control.send_text(text)
+            await self.queue_user_transcript(text, metric)
+
+    async def queue_user_transcript(self, text: str, metric: TurnLatency) -> None:
+        if not TRANSCRIPT_COALESCING_ENABLED:
+            await self.commit_user_transcript(text, metric)
+            return
+
+        text = clean_transcript_fragment(text)
+        if not text:
+            return
+
+        now = time.perf_counter()
+        structured = looks_like_structured_transcript(text)
+
+        if self.pending_transcript is None:
+            self.pending_transcript = PendingTranscript(
+                parts=[text],
+                metric=metric,
+                first_part_at=now,
+                structured=structured,
+            )
+        else:
+            pending = self.pending_transcript
+            pending.parts.append(text)
+            pending.structured = pending.structured or structured
+            pending.metric.stt_ended_at = metric.stt_ended_at
+
+        combined = join_transcript_fragments(self.pending_transcript.parts)
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcript.pending",
+                "timestamp": now_iso(),
+                "payload": {
+                    "text": combined,
+                    "parts": len(self.pending_transcript.parts),
+                    "structured": self.pending_transcript.structured,
+                },
+            }
+        )
+
+        if self.pending_transcript_task:
+            self.pending_transcript_task.cancel()
+
+        elapsed_coalesce_ms = int((now - self.pending_transcript.first_part_at) * 1000)
+        should_commit_now = (
+            transcript_looks_complete(combined)
+            or (
+                TRANSCRIPT_MAX_COALESCE_MS > 0
+                and elapsed_coalesce_ms >= TRANSCRIPT_MAX_COALESCE_MS
+            )
+        )
+        delay_ms = 0 if should_commit_now else self.transcript_commit_delay_ms(combined)
+        self.schedule_pending_transcript_commit(delay_ms)
+
+    def schedule_pending_transcript_commit(self, delay_ms: int) -> None:
+        if self.pending_transcript_task:
+            self.pending_transcript_task.cancel()
+        self.pending_transcript_task = asyncio.create_task(
+            self.commit_pending_transcript_after(delay_ms)
+        )
+
+    def transcript_commit_delay_ms(self, text: str) -> int:
+        if looks_like_structured_transcript(text):
+            return TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS
+        return TRANSCRIPT_COMMIT_DELAY_MS
+
+    async def commit_pending_transcript_after(self, delay_ms: int) -> None:
+        try:
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000)
+            await self.flush_pending_transcript("timer")
+        except asyncio.CancelledError:
+            raise
+
+    async def flush_pending_transcript(self, reason: str) -> None:
+        pending = self.pending_transcript
+        if pending is None:
+            return
+
+        self.pending_transcript = None
+        self.pending_transcript_task = None
+        text = join_transcript_fragments(pending.parts)
+        if not text:
+            return
+
+        logger.info(
+            "voice.transcript.commit reason=%s parts=%d chars=%d structured=%s",
+            reason,
+            len(pending.parts),
+            len(text),
+            pending.structured,
+        )
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcript.committed",
+                "timestamp": now_iso(),
+                "payload": {
+                    "text": text,
+                    "parts": len(pending.parts),
+                    "structured": pending.structured,
+                    "reason": reason,
+                },
+            }
+        )
+        await self.commit_user_transcript(text, pending.metric)
+
+    async def commit_user_transcript(self, text: str, metric: TurnLatency) -> None:
+        if not self.control or self.closed or self.call_ending:
+            return
+
+        metric.text_sent_at = time.perf_counter()
+        self.pending_turn_latencies.append(metric)
+        await self.control.send_text(text)
 
     async def handle_assistant_text_chunk(self, event: Dict[str, Any]) -> None:
         payload = event.get("payload") or {}
@@ -1807,9 +2063,14 @@ class VoiceSession:
 
     async def close(self) -> None:
         self.closed = True
+        pending_transcript_task = self.pending_transcript_task
+        if self.pending_transcript_task:
+            self.pending_transcript_task.cancel()
+            self.pending_transcript_task = None
         self.tts_worker_task.cancel()
         self.stt_worker_task.cancel()
         await asyncio.gather(
+            *(task for task in [pending_transcript_task] if task is not None),
             self.tts_worker_task,
             self.stt_worker_task,
             return_exceptions=True,
