@@ -551,10 +551,10 @@ export class OrchestratorService {
   private findSpeechBoundary(text: string, force: boolean): number | undefined {
     const streamingAudio = this.tts.canStreamAudio();
     const gatewayOwnsSpeech = !this.tts.isEnabled();
-    const minSentenceChars = gatewayOwnsSpeech ? 24 : streamingAudio ? 64 : 24;
-    const preferredChars = gatewayOwnsSpeech ? 55 : streamingAudio ? 125 : 90;
-    const maxChars = gatewayOwnsSpeech ? 85 : streamingAudio ? 200 : 140;
-    const minSoftBoundaryChars = gatewayOwnsSpeech ? 18 : 50;
+    const minSentenceChars = gatewayOwnsSpeech ? 36 : streamingAudio ? 64 : 24;
+    const preferredChars = gatewayOwnsSpeech ? 95 : streamingAudio ? 125 : 90;
+    const maxChars = gatewayOwnsSpeech ? 145 : streamingAudio ? 200 : 140;
+    const minSoftBoundaryChars = gatewayOwnsSpeech ? 45 : 50;
 
     for (const match of text.matchAll(/[.!?](?=\s|$)/g)) {
       const end = (match.index ?? 0) + 1;

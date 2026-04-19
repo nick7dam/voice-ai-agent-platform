@@ -235,9 +235,10 @@ Then run:
 ```bash
 LOCAL_TTS_ENGINE=chatterbox_turbo \
 LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH=/absolute/path/to/reference-voice.wav \
-VOICE_TTS_FIRST_PHRASE_MAX_CHARS=36 \
-VOICE_TTS_PHRASE_TARGET_CHARS=42 \
-VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN=180 \
+VOICE_TTS_FIRST_PHRASE_MAX_CHARS=95 \
+VOICE_TTS_PHRASE_TARGET_CHARS=95 \
+VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN=260 \
+VOICE_TTS_TRIM_SILENCE=true \
 NEST_WS_URL=ws://127.0.0.1:3000/realtime \
 pnpm local:voice:chatterbox:cuda
 ```
@@ -246,8 +247,8 @@ The Chatterbox path keeps the assistant response text plain. The gateway may add
 small TTS-only paralinguistic cues such as `[chuckle]` to the audio prompt when
 `LOCAL_CHATTERBOX_EMOTION_TAGS=true`; those tags are not sent to chat history.
 Chatterbox Turbo generates complete audio for each text phrase, so the gateway
-keeps phrases intentionally short and caps spoken characters per turn while the
-full assistant text still appears in the UI.
+uses natural phrase boundaries, trims generated silence, and caps spoken
+characters per turn while the full assistant text still appears in the UI.
 
 Then open `http://localhost:3000`, use **Start WebRTC voice**, and leave the old
 **Start live mic** button alone. The old WebSocket voice path remains available

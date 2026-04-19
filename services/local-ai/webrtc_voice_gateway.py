@@ -80,17 +80,22 @@ CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
 CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
 TTS_MIN_PHRASE_CHARS = max(1, int(os.getenv("VOICE_TTS_MIN_PHRASE_CHARS", "8")))
 TTS_PHRASE_TARGET_CHARS = max(
-    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_PHRASE_TARGET_CHARS", "42"))
+    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_PHRASE_TARGET_CHARS", "95"))
 )
 TTS_PHRASE_MAX_CHARS = max(
-    TTS_PHRASE_TARGET_CHARS, int(os.getenv("VOICE_TTS_PHRASE_MAX_CHARS", "70"))
+    TTS_PHRASE_TARGET_CHARS, int(os.getenv("VOICE_TTS_PHRASE_MAX_CHARS", "145"))
 )
 TTS_FIRST_PHRASE_MAX_CHARS = max(
-    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_FIRST_PHRASE_MAX_CHARS", "36"))
+    TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_FIRST_PHRASE_MAX_CHARS", "95"))
 )
 TTS_MAX_SPOKEN_CHARS_PER_TURN = max(
-    0, int(os.getenv("VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN", "180"))
+    0, int(os.getenv("VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN", "260"))
 )
+TTS_TRIM_SILENCE = env_bool("VOICE_TTS_TRIM_SILENCE", True)
+TTS_TRIM_SILENCE_THRESHOLD = float(
+    os.getenv("VOICE_TTS_TRIM_SILENCE_THRESHOLD", "0.008")
+)
+TTS_TRIM_SILENCE_KEEP_MS = int(os.getenv("VOICE_TTS_TRIM_SILENCE_KEEP_MS", "80"))
 
 INPUT_SAMPLE_RATE = 16000
 MIN_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_MIN_SPEECH_THRESHOLD", "0.025"))
@@ -576,22 +581,30 @@ def choose_chatterbox_phrase_boundary(text: str, limit: int, target: int) -> int
 
     search = text[:limit]
     min_chars = min(TTS_MIN_PHRASE_CHARS, max(1, target))
+    sentence_min_chars = min(4, TTS_MIN_PHRASE_CHARS)
 
-    for pattern in (r"[.!?](?=\s|$)", r"[,;:](?=\s|$)"):
-        matches = [
-            match.start() + 1
-            for match in re.finditer(pattern, search)
-            if match.start() + 1 >= min_chars
-        ]
-        for end in matches:
-            if end >= target:
-                return end
-        if matches:
-            return matches[-1]
+    sentence_matches = [
+        match.start() + 1
+        for match in re.finditer(r"[.!?](?=\s|$)", search)
+        if match.start() + 1 >= sentence_min_chars
+    ]
+    for end in sentence_matches:
+        if end >= target:
+            return end
+    if sentence_matches:
+        return sentence_matches[-1]
 
-    target_space = search.rfind(" ", 0, min(target + 1, len(search)))
-    if target_space >= min_chars:
-        return target_space
+    clause_min_chars = min(limit, max(45, TTS_MIN_PHRASE_CHARS))
+    clause_matches = [
+        match.start() + 1
+        for match in re.finditer(r"[,;:](?=\s|$)", search)
+        if match.start() + 1 >= clause_min_chars
+    ]
+    for end in clause_matches:
+        if end >= target:
+            return end
+    if clause_matches:
+        return clause_matches[-1]
 
     last_space = search.rfind(" ")
     if last_space >= min_chars:
@@ -724,6 +737,20 @@ def resample_float32(audio: np.ndarray, source_rate: int, target_rate: int) -> n
     return np.interp(target_positions, source_positions, audio).astype(np.float32)
 
 
+def trim_generated_silence(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    if not TTS_TRIM_SILENCE or audio.size == 0:
+        return audio
+
+    active = np.flatnonzero(np.abs(audio) >= TTS_TRIM_SILENCE_THRESHOLD)
+    if active.size == 0:
+        return audio
+
+    keep_samples = int(sample_rate * TTS_TRIM_SILENCE_KEEP_MS / 1000)
+    start = max(0, int(active[0]) - keep_samples)
+    end = min(audio.size, int(active[-1]) + keep_samples)
+    return np.ascontiguousarray(audio[start:end], dtype=np.float32)
+
+
 def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
     started_at = time.perf_counter()
     temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
@@ -784,6 +811,7 @@ def iter_tts_audio(text: str):
             int(getattr(model, "sr", TTS_SAMPLE_RATE)),
             TTS_SAMPLE_RATE,
         )
+        audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
         logger.info(
             "voice.tts.chatterbox.generate.end chars=%d samples=%d audioSeconds=%.2f latencyMs=%d",
             len(speech_text),
