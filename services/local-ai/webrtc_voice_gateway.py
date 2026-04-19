@@ -61,6 +61,9 @@ GREETING_TEXT = os.getenv(
     "Hi, this is Northside Auto Service's AI receptionist. I can help with bookings, hours, location, and service questions. How can I help you today?",
 )
 CALL_END_MARKER = "[[END_CALL]]"
+CALL_END_AUDIO_TAIL_MS = int(os.getenv("VOICE_CALL_END_AUDIO_TAIL_MS", "650"))
+OUTPUT_DRAIN_POLL_MS = int(os.getenv("VOICE_OUTPUT_DRAIN_POLL_MS", "50"))
+OUTPUT_DRAIN_MAX_MS = int(os.getenv("VOICE_OUTPUT_DRAIN_MAX_MS", "30000"))
 
 CHATTERBOX_MODEL_NAME = os.getenv(
     "LOCAL_CHATTERBOX_MODEL", "ResembleAI/chatterbox-turbo"
@@ -836,6 +839,7 @@ class PcmOutputTrack(MediaStreamTrack):
         self.frame_samples = int(sample_rate * frame_ms / 1000)
         self.queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         self.pending = np.zeros(0, dtype=np.int16)
+        self.queued_samples = 0
         self.pts = 0
         self.started_at = time.monotonic()
 
@@ -843,16 +847,29 @@ class PcmOutputTrack(MediaStreamTrack):
         if audio.size == 0:
             return
         pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16, copy=False)
+        self.queued_samples += int(pcm.size)
         await self.queue.put(pcm)
 
     async def clear(self) -> None:
         self.pending = np.zeros(0, dtype=np.int16)
+        self.queued_samples = 0
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
                 self.queue.task_done()
             except asyncio.QueueEmpty:
                 break
+
+    def buffered_samples(self) -> int:
+        return int(self.pending.size) + max(0, int(self.queued_samples))
+
+    def buffered_seconds(self) -> float:
+        if self.sample_rate <= 0:
+            return 0.0
+        return self.buffered_samples() / self.sample_rate
+
+    def has_buffered_audio(self) -> bool:
+        return self.buffered_samples() > 0
 
     async def recv(self) -> AudioFrame:
         wait_until = self.started_at + self.pts / self.sample_rate
@@ -864,6 +881,7 @@ class PcmOutputTrack(MediaStreamTrack):
             try:
                 chunk = self.queue.get_nowait()
                 self.queue.task_done()
+                self.queued_samples = max(0, self.queued_samples - int(chunk.size))
             except asyncio.QueueEmpty:
                 break
             self.pending = np.concatenate([self.pending, chunk])
@@ -1254,7 +1272,12 @@ class VoiceSession:
 
     def is_assistant_interruptible(self) -> bool:
         recent = time.monotonic() - self.last_assistant_audio_at < 1.5
-        return self.assistant_speaking or not self.tts_queue.empty() or recent
+        return (
+            self.assistant_speaking
+            or not self.tts_queue.empty()
+            or self.output_track.has_buffered_audio()
+            or recent
+        )
 
     def is_in_assistant_barge_grace(self) -> bool:
         if self.assistant_audio_started_at <= 0:
@@ -1323,8 +1346,18 @@ class VoiceSession:
 
     async def end_call_when_audio_idle(self, reason: str) -> None:
         await asyncio.sleep(0.15)
-        while not self.closed and (self.assistant_speaking or not self.tts_queue.empty()):
-            await asyncio.sleep(0.05)
+        while not self.closed:
+            while not self.closed and self.has_pending_assistant_audio():
+                await asyncio.sleep(OUTPUT_DRAIN_POLL_MS / 1000)
+
+            if self.closed:
+                return
+
+            if CALL_END_AUDIO_TAIL_MS > 0:
+                await asyncio.sleep(CALL_END_AUDIO_TAIL_MS / 1000)
+
+            if not self.has_pending_assistant_audio():
+                break
 
         await self.end_call(reason)
 
@@ -1349,6 +1382,33 @@ class VoiceSession:
 
         await asyncio.sleep(0.35)
         await self.close()
+
+    def has_pending_assistant_audio(self) -> bool:
+        return (
+            self.assistant_speaking
+            or not self.tts_queue.empty()
+            or self.output_track.has_buffered_audio()
+        )
+
+    async def wait_output_audio_drained(self, stop_if_tts_queue_fills: bool) -> bool:
+        started_at = time.perf_counter()
+        while not self.closed:
+            if stop_if_tts_queue_fills and not self.tts_queue.empty():
+                return False
+
+            if not self.output_track.has_buffered_audio():
+                return True
+
+            if OUTPUT_DRAIN_MAX_MS > 0 and elapsed_ms(started_at) > OUTPUT_DRAIN_MAX_MS:
+                logger.warning(
+                    "voice.output.drain_timeout bufferedSeconds=%.2f",
+                    self.output_track.buffered_seconds(),
+                )
+                return True
+
+            await asyncio.sleep(OUTPUT_DRAIN_POLL_MS / 1000)
+
+        return False
 
     def begin_turn_latency(self) -> TurnLatency:
         self.local_turn_sequence += 1
@@ -1668,23 +1728,31 @@ class VoiceSession:
             finally:
                 self.tts_queue.task_done()
                 if self.tts_queue.empty():
-                    self.assistant_speaking = False
-                    await self.send_browser_event(
-                        {
-                            "type": "gateway.tts.ended",
-                            "timestamp": now_iso(),
-                            "payload": {
-                                "turnId": turn_id,
-                                "latencyMs": elapsed_ms(started_at),
-                            },
-                        }
+                    drained = await self.wait_output_audio_drained(
+                        stop_if_tts_queue_fills=True
                     )
-                    if (
-                        self.pending_end_turn_id == turn_id
-                        and generation == self.tts_generation
-                        and turn_id not in self.cancelled_turn_ids
-                    ):
-                        asyncio.create_task(self.end_call("assistant_completed_call"))
+                    if drained and self.tts_queue.empty():
+                        self.assistant_speaking = False
+                        await self.send_browser_event(
+                            {
+                                "type": "gateway.tts.ended",
+                                "timestamp": now_iso(),
+                                "payload": {
+                                    "turnId": turn_id,
+                                    "latencyMs": elapsed_ms(started_at),
+                                },
+                            }
+                        )
+                        if (
+                            self.pending_end_turn_id == turn_id
+                            and generation == self.tts_generation
+                            and turn_id not in self.cancelled_turn_ids
+                        ):
+                            asyncio.create_task(
+                                self.end_call_when_audio_idle(
+                                    "assistant_completed_call"
+                                )
+                            )
 
     async def synthesize_to_track(self, turn_id: str, text: str, generation: int) -> None:
         loop = asyncio.get_running_loop()

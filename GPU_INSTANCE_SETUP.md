@@ -254,6 +254,9 @@ NEST_WS_URL=ws://127.0.0.1:3000/realtime
 VOICE_GATEWAY_TTS_ENABLED=true
 VOICE_GATEWAY_GREETING_ENABLED=true
 VOICE_GATEWAY_GREETING_TEXT="Hi, this is the Northside Auto Service AI receptionist. I can help with bookings, hours, location, and service questions. How can I help you today?"
+VOICE_CALL_END_AUDIO_TAIL_MS=650
+VOICE_OUTPUT_DRAIN_POLL_MS=50
+VOICE_OUTPUT_DRAIN_MAX_MS=30000
 
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
 LOCAL_STT_DEVICE=cuda
