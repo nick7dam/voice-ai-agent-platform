@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { ServerEvent } from '../../common/types/realtime-events';
 import { ChatMessage } from '../../common/types/reasoning.types';
-import { NormalizedToolResult } from '../../common/types/tool.types';
+import { SessionState } from '../../common/types/session.types';
+import { NormalizedToolResult, ToolCall } from '../../common/types/tool.types';
 import { elapsedMs, nowIso } from '../../common/utils/timing';
 import { ReasoningService } from '../reasoning/reasoning.service';
 import { SessionsService } from '../sessions/sessions.service';
@@ -19,6 +21,17 @@ export type OrchestratorEmit = (event: ServerEvent) => void;
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
   private readonly callEndMarker = '[[END_CALL]]';
+  private readonly receptionistRuntimeTools = [
+    'get_workshop_info',
+    'find_customer_by_phone',
+    'create_customer',
+    'find_vehicle_by_rego',
+    'create_vehicle',
+    'find_latest_booking_by_phone',
+    'check_booking_availability',
+    'create_booking',
+    'create_escalation',
+  ];
 
   constructor(
     private readonly sessions: SessionsService,
@@ -76,7 +89,9 @@ export class OrchestratorService {
       });
 
       const session = this.sessions.get(sessionId);
-      const task = this.tasks.get(session.taskKey, true);
+      const task = this.withRuntimeRequiredTools(
+        this.tasks.get(session.taskKey, true),
+      );
       const messages = this.prompts.build(session, task, trimmedTranscript);
       const tools = this.toolRegistry.toLlmTools(task.allowedTools);
 
@@ -168,104 +183,122 @@ export class OrchestratorService {
           );
         }
       };
-      const shouldUseTools = this.shouldUseTools(trimmedTranscript);
-      const initial = shouldUseTools
-        ? await this.reasoning.generate({
-            messages,
-            tools,
-            temperature: 0.2,
-          })
-        : await this.reasoning.stream(
-            {
-              messages,
-              temperature: 0.15,
-            },
-            {
-              onTextDelta: (delta) => {
-                ensureTurnCurrent();
-                streamedText += delta;
-                if (delta.trim()) {
-                  emitFirstToken('stream');
-                }
+      const deterministicToolCalls = this.buildDeterministicToolCalls(
+        trimmedTranscript,
+        task,
+        session,
+      );
+      const shouldAskModelForTools =
+        deterministicToolCalls.length > 0 ||
+        this.shouldUseTools(trimmedTranscript);
+      let toolsUsed = deterministicToolCalls.length > 0;
+      const toolResultsForTurn: NormalizedToolResult[] = [];
+      let finalText = '';
+      let providerLatencyMs = 0;
 
-                const chunks = this.extractSpeechChunks(
-                  streamedText,
-                  speechCursor,
-                  false,
-                );
-
-                for (const chunk of chunks) {
-                  speechCursor = chunk.endIndex;
-                  emitSpeechTextChunk(chunk.text, false);
-
-                  if (
-                    this.tts.isEnabled() &&
-                    this.tts.shouldEmitEarlyAudio() &&
-                    this.sessions.isAudioOutputEnabled(sessionId)
-                  ) {
-                    if (this.tts.shouldStreamPhrases()) {
-                      queueEarlySpeech(chunk.text);
-                    } else if (!earlyAudioStarted) {
-                      queueEarlySpeech(chunk.text);
-                    }
-                  }
-                }
-              },
-            },
-          );
-
-      let finalText = initial.text;
-      let providerLatencyMs = initial.latencyMs;
-      if (shouldUseTools) {
+      if (deterministicToolCalls.length > 0) {
         emitFirstToken('generate');
-      }
-
-      if (!this.isTurnCurrent(sessionId, turnId)) {
-        this.logger.log(
-          `reasoning.skip_stale_after_initial session=${sessionId} turn=${turnId}`,
-        );
-        return;
-      }
-
-      if (initial.toolCalls.length > 0) {
-        const toolResults = await this.executeTools(
+        const final = await this.generateAfterTools(
           sessionId,
           turnId,
           task,
-          initial.toolCalls,
+          messages,
+          "I'll check that.",
+          deterministicToolCalls,
           emit,
         );
-
-        if (!this.isTurnCurrent(sessionId, turnId)) {
-          this.logger.log(
-            `reasoning.skip_stale_after_tools session=${sessionId} turn=${turnId}`,
-          );
-          return;
-        }
-
-        const followupMessages = this.buildToolFollowupMessages(
-          messages,
-          initial.text,
-          initial.toolCalls,
-          toolResults,
-        );
-
-        const final = await this.reasoning.generate({
-          messages: followupMessages,
-          temperature: 0.2,
-        });
-
-        if (!this.isTurnCurrent(sessionId, turnId)) {
-          this.logger.log(
-            `reasoning.skip_stale_after_tool_followup session=${sessionId} turn=${turnId}`,
-          );
-          return;
-        }
-
         finalText = final.text;
-        providerLatencyMs +=
-          final.latencyMs +
-          toolResults.reduce((sum, item) => sum + item.latencyMs, 0);
+        providerLatencyMs = final.providerLatencyMs;
+        toolResultsForTurn.push(...final.toolResults);
+      } else {
+        const initial = shouldAskModelForTools
+          ? await this.reasoning.generate({
+              messages,
+              tools,
+              temperature: 0.2,
+            })
+          : await this.reasoning.stream(
+              {
+                messages,
+                temperature: 0.15,
+              },
+              {
+                onTextDelta: (delta) => {
+                  ensureTurnCurrent();
+                  streamedText += delta;
+                  if (delta.trim()) {
+                    emitFirstToken('stream');
+                  }
+
+                  const chunks = this.extractSpeechChunks(
+                    streamedText,
+                    speechCursor,
+                    false,
+                  );
+
+                  for (const chunk of chunks) {
+                    speechCursor = chunk.endIndex;
+                    emitSpeechTextChunk(chunk.text, false);
+
+                    if (
+                      this.tts.isEnabled() &&
+                      this.tts.shouldEmitEarlyAudio() &&
+                      this.sessions.isAudioOutputEnabled(sessionId)
+                    ) {
+                      if (this.tts.shouldStreamPhrases()) {
+                        queueEarlySpeech(chunk.text);
+                      } else if (!earlyAudioStarted) {
+                        queueEarlySpeech(chunk.text);
+                      }
+                    }
+                  }
+                },
+              },
+            );
+
+        finalText = initial.text;
+        providerLatencyMs = initial.latencyMs;
+        if (shouldAskModelForTools) {
+          emitFirstToken('generate');
+        }
+
+        if (!this.isTurnCurrent(sessionId, turnId)) {
+          this.logger.log(
+            `reasoning.skip_stale_after_initial session=${sessionId} turn=${turnId}`,
+          );
+          return;
+        }
+
+        const inferredToolCalls =
+          initial.toolCalls.length > 0
+            ? initial.toolCalls
+            : this.inferToolCallsFromAssistantText(
+                initial.text,
+                task,
+                trimmedTranscript,
+              );
+
+        if (inferredToolCalls.length > 0) {
+          toolsUsed = true;
+          if (initial.toolCalls.length === 0) {
+            this.logger.warn(
+              `reasoning.pseudo_tool_call session=${sessionId} turn=${turnId} calls=${inferredToolCalls.map((call) => call.name).join(',')}`,
+            );
+          }
+
+          const final = await this.generateAfterTools(
+            sessionId,
+            turnId,
+            task,
+            messages,
+            initial.toolCalls.length > 0 ? initial.text : "I'll check that.",
+            inferredToolCalls,
+            emit,
+          );
+          finalText = final.text;
+          providerLatencyMs += final.providerLatencyMs;
+          toolResultsForTurn.push(...final.toolResults);
+        }
       }
 
       if (!this.isTurnCurrent(sessionId, turnId)) {
@@ -278,7 +311,12 @@ export class OrchestratorService {
       const shouldEndCall =
         this.shouldEndCall(finalText) ||
         this.isCallEndingUserText(trimmedTranscript);
-      const safeText = this.normalizeAssistantText(finalText, task);
+      const groundedText = this.enforceGroundedToolClaims(
+        finalText,
+        trimmedTranscript,
+        toolResultsForTurn,
+      );
+      const safeText = this.normalizeAssistantText(groundedText, task);
       const totalLatencyMs = elapsedMs(startedAt);
       this.sessions.appendHistory(sessionId, {
         role: 'assistant',
@@ -329,7 +367,7 @@ export class OrchestratorService {
       }
 
       this.logger.log(
-        `reasoning.end session=${sessionId} turn=${turnId} latencyMs=${totalLatencyMs} providerLatencyMs=${providerLatencyMs} toolsEnabled=${shouldUseTools} earlyAudio=${earlyAudioStarted}`,
+        `reasoning.end session=${sessionId} turn=${turnId} latencyMs=${totalLatencyMs} providerLatencyMs=${providerLatencyMs} toolsEnabled=${shouldAskModelForTools} toolsUsed=${toolsUsed} earlyAudio=${earlyAudioStarted}`,
       );
     } catch (error) {
       const payload = toErrorPayload(error);
@@ -363,6 +401,62 @@ export class OrchestratorService {
     } catch {
       return false;
     }
+  }
+
+  private async generateAfterTools(
+    sessionId: string,
+    turnId: string,
+    task: TaskConfig,
+    messages: ChatMessage[],
+    assistantText: string,
+    toolCalls: ToolCall[],
+    emit: OrchestratorEmit,
+  ): Promise<{
+    text: string;
+    providerLatencyMs: number;
+    toolResults: NormalizedToolResult[];
+  }> {
+    const toolResults = await this.executeTools(
+      sessionId,
+      turnId,
+      task,
+      toolCalls,
+      emit,
+    );
+
+    if (!this.isTurnCurrent(sessionId, turnId)) {
+      throw new AppError(
+        'TURN_INTERRUPTED',
+        'Tool follow-up stopped because a newer turn interrupted this response.',
+      );
+    }
+
+    const followupMessages = this.buildToolFollowupMessages(
+      messages,
+      assistantText,
+      toolCalls,
+      toolResults,
+    );
+
+    const final = await this.reasoning.generate({
+      messages: followupMessages,
+      temperature: 0.2,
+    });
+
+    if (!this.isTurnCurrent(sessionId, turnId)) {
+      throw new AppError(
+        'TURN_INTERRUPTED',
+        'Tool follow-up stopped because a newer turn interrupted this response.',
+      );
+    }
+
+    return {
+      text: final.text,
+      providerLatencyMs:
+        final.latencyMs +
+        toolResults.reduce((sum, item) => sum + item.latencyMs, 0),
+      toolResults,
+    };
   }
 
   private async executeTools(
@@ -424,13 +518,542 @@ export class OrchestratorService {
       {
         role: 'user',
         content:
-          'Use the tool results above to answer the user. If a tool reports invalid or missing customer details, ask one short question for only that information. Return only the final user-facing plain text response.',
+          'Use only the tool results above to answer the user. If a lookup says found:false, say you could not find that record and ask one short next question. If a tool failed, do not invent success; apologize briefly and ask to try again or offer escalation. Never say you found a customer, vehicle, booking, slot, or opening time unless a successful tool result proves it. Return only the final user-facing plain text response.',
       },
     ];
   }
 
+  private withRuntimeRequiredTools(task: TaskConfig): TaskConfig {
+    const looksLikeReceptionistTask =
+      task.key === 'general_voice_assistant' ||
+      /car service|workshop|receptionist/i.test(
+        `${task.name} ${task.systemPrompt}`,
+      );
+
+    if (!looksLikeReceptionistTask) {
+      return task;
+    }
+
+    const allowedTools = [
+      ...new Set([...task.allowedTools, ...this.receptionistRuntimeTools]),
+    ];
+
+    if (allowedTools.length !== task.allowedTools.length) {
+      this.logger.warn(
+        `task.runtime_tools_added task=${task.key} added=${allowedTools.filter((tool) => !task.allowedTools.includes(tool)).join(',')}`,
+      );
+    }
+
+    return {
+      ...task,
+      allowedTools,
+    };
+  }
+
+  private buildDeterministicToolCalls(
+    transcript: string,
+    task: TaskConfig,
+    session: SessionState,
+  ): ToolCall[] {
+    const lower = transcript.toLowerCase();
+    const calls: ToolCall[] = [];
+
+    if (this.isAllowedTool(task, 'get_workshop_info')) {
+      const info = this.inferWorkshopInfoRequest(lower);
+      if (info) {
+        calls.push(this.createToolCall('get_workshop_info', { info }));
+      }
+    }
+
+    if (
+      calls.length === 0 &&
+      this.isAllowedTool(task, 'find_customer_by_phone')
+    ) {
+      const phone = this.extractAustralianPhoneCandidate(transcript);
+      if (phone) {
+        calls.push(this.createToolCall('find_customer_by_phone', { phone }));
+      }
+    }
+
+    if (
+      calls.length === 0 &&
+      this.isAllowedTool(task, 'find_vehicle_by_rego')
+    ) {
+      const registration = this.extractRegistrationCandidate(transcript);
+      if (registration) {
+        calls.push(this.createToolCall('find_vehicle_by_rego', { registration }));
+      }
+    }
+
+    if (
+      calls.length === 0 &&
+      this.isAllowedTool(task, 'check_booking_availability')
+    ) {
+      const serviceType = this.inferServiceType(
+        `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
+      );
+      const lastAssistant = [...session.history]
+        .reverse()
+        .find((item) => item.role === 'assistant')?.text;
+      const answeredServiceQuestion =
+        Boolean(serviceType) &&
+        /\b(what type of service|what service|service do you need|which service)\b/i.test(
+          lastAssistant ?? '',
+        );
+      const bookingIntent =
+        /\b(book|booking|appointment|schedule|available|availability|slot)\b/.test(
+          lower,
+        );
+
+      if (bookingIntent || answeredServiceQuestion) {
+        calls.push(
+          this.createToolCall(
+            'check_booking_availability',
+            this.compactObject({
+              serviceType,
+              date: this.inferDatePreference(
+                `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
+              ),
+              preferredTimeOfDay: this.inferPreferredTimeOfDay(
+                `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
+              ),
+            }),
+          ),
+        );
+      }
+    }
+
+    if (calls.length > 0) {
+      this.logger.log(
+        `tool.route.deterministic calls=${calls.map((call) => call.name).join(',')}`,
+      );
+    }
+
+    return calls;
+  }
+
+  private inferToolCallsFromAssistantText(
+    text: string,
+    task: TaskConfig,
+    transcript: string,
+  ): ToolCall[] {
+    const parsed = this.parseJsonObjectFromText(text);
+    if (!parsed) {
+      return [];
+    }
+
+    const explicitCalls = this.extractExplicitJsonToolCalls(parsed, task);
+    if (explicitCalls.length > 0) {
+      return explicitCalls;
+    }
+
+    if (this.isAllowedTool(task, 'check_booking_availability')) {
+      const bookingArgs = this.inferBookingAvailabilityArgsFromJson(
+        parsed,
+        transcript,
+      );
+      if (bookingArgs) {
+        return [this.createToolCall('check_booking_availability', bookingArgs)];
+      }
+    }
+
+    return [];
+  }
+
+  private extractExplicitJsonToolCalls(
+    parsed: Record<string, unknown>,
+    task: TaskConfig,
+  ): ToolCall[] {
+    const toolCalls = Array.isArray(parsed.tool_calls)
+      ? parsed.tool_calls
+      : Array.isArray(parsed.toolCalls)
+        ? parsed.toolCalls
+        : undefined;
+
+    if (toolCalls) {
+      return toolCalls
+        .map((call) => {
+          if (!this.isRecord(call)) {
+            return undefined;
+          }
+
+          const fn = this.isRecord(call.function) ? call.function : call;
+          const name = typeof fn.name === 'string' ? fn.name : undefined;
+          if (!name || !this.isAllowedTool(task, name)) {
+            return undefined;
+          }
+
+          return this.createToolCall(
+            name,
+            this.normalizeJsonValue(fn.arguments ?? fn.args ?? {}),
+            typeof call.id === 'string' ? call.id : undefined,
+          );
+        })
+        .filter((call): call is ToolCall => Boolean(call));
+    }
+
+    const name =
+      typeof parsed.tool === 'string'
+        ? parsed.tool
+        : typeof parsed.name === 'string'
+          ? parsed.name
+          : typeof parsed.toolName === 'string'
+            ? parsed.toolName
+            : undefined;
+
+    if (!name || !this.isAllowedTool(task, name)) {
+      return [];
+    }
+
+    return [
+      this.createToolCall(
+        name,
+        this.normalizeJsonValue(
+          parsed.arguments ?? parsed.args ?? parsed.input ?? parsed.parameters ?? {},
+        ),
+      ),
+    ];
+  }
+
+  private inferBookingAvailabilityArgsFromJson(
+    parsed: Record<string, unknown>,
+    transcript: string,
+  ): Record<string, unknown> | undefined {
+    const serviceType = this.inferServiceType(
+      String(parsed.serviceType ?? parsed.service_type ?? transcript),
+    );
+    const hasBookingShape = [
+      'serviceType',
+      'service_type',
+      'slotStart',
+      'slot_start',
+      'slotEnd',
+      'slot_end',
+      'vehicleId',
+      'vehicle_id',
+      'customerId',
+      'customer_id',
+    ].some((key) => key in parsed);
+
+    if (!hasBookingShape && !serviceType) {
+      return undefined;
+    }
+
+    const normalized = this.normalizeJsonValue(parsed);
+    const record = this.isRecord(normalized) ? normalized : {};
+
+    return this.compactObject({
+      serviceType,
+      date:
+        this.asString(record.date) ??
+        this.inferDatePreference(`${transcript} ${JSON.stringify(parsed)}`),
+      preferredTimeOfDay: this.inferPreferredTimeOfDay(
+        `${transcript} ${JSON.stringify(parsed)}`,
+      ),
+      customerId: this.asString(record.customerId ?? record.customer_id),
+      vehicleId: this.asString(record.vehicleId ?? record.vehicle_id),
+      slotStart: this.asString(record.slotStart ?? record.slot_start),
+    });
+  }
+
+  private inferWorkshopInfoRequest(
+    lower: string,
+  ): 'hours' | 'today_hours' | 'location' | 'services' | 'all' | undefined {
+    if (/\b(location|address|where are you|directions|parking)\b/.test(lower)) {
+      return 'location';
+    }
+
+    if (/\b(services|service list|what do you do|what.*offer)\b/.test(lower)) {
+      return 'services';
+    }
+
+    if (/\b(open today|today'?s hours|today hours)\b/.test(lower)) {
+      return 'today_hours';
+    }
+
+    if (/\b(open|closed|hours|opening|closing|open tomorrow)\b/.test(lower)) {
+      return 'hours';
+    }
+
+    return undefined;
+  }
+
+  private inferServiceType(text: string): string | undefined {
+    const lower = text.toLowerCase();
+    const matches: Array<[RegExp, string]> = [
+      [/\boil\s+change\b/, 'oil_change'],
+      [/\blogbook\b|\blog\s*book\b/, 'logbook_service'],
+      [/\bbrake|brakes\b/, 'brakes'],
+      [/\btyre|tyres|tire|tires\b/, 'tyres'],
+      [/\bbattery\b/, 'battery'],
+      [/\bdiagnostic|engine light|check engine\b/, 'engine_diagnostics'],
+      [/\btransmission\b/, 'transmission'],
+      [/\bsuspension\b/, 'suspension'],
+      [/\binspection|roadworthy\b/, 'inspection'],
+    ];
+
+    return matches.find(([pattern]) => pattern.test(lower))?.[1];
+  }
+
+  private inferDatePreference(text: string): string | undefined {
+    const lower = text.toLowerCase();
+    const isoDate = text.match(/\b\d{4}-\d{2}-\d{2}\b/)?.[0];
+    if (isoDate) {
+      return isoDate;
+    }
+
+    if (/\btomorrow\b/.test(lower)) {
+      return 'tomorrow';
+    }
+
+    if (/\btoday\b/.test(lower)) {
+      return 'today';
+    }
+
+    return undefined;
+  }
+
+  private inferPreferredTimeOfDay(text: string): 'morning' | 'afternoon' | 'any' {
+    const lower = text.toLowerCase();
+    if (/\bmorning\b/.test(lower)) {
+      return 'morning';
+    }
+
+    if (/\bafternoon\b/.test(lower)) {
+      return 'afternoon';
+    }
+
+    return 'any';
+  }
+
+  private extractAustralianPhoneCandidate(text: string): string | undefined {
+    const candidates = text.match(/(?:\+?61|0)[\d\s().-]{8,18}/g) ?? [];
+    return candidates.find((candidate) =>
+      /^(?:\+?61|0)\D*\d/.test(candidate.trim()),
+    );
+  }
+
+  private extractRegistrationCandidate(text: string): string | undefined {
+    const match = text.match(
+      /\b(?:rego|registration|plate|licen[cs]e plate)\s*(?:is|number is|:)?\s*([a-z0-9 -]{2,10})\b/i,
+    );
+    return match?.[1]?.trim();
+  }
+
+  private enforceGroundedToolClaims(
+    text: string,
+    transcript: string,
+    toolResults: NormalizedToolResult[],
+  ): string {
+    if (!text.trim()) {
+      return text;
+    }
+
+    const lower = text.toLowerCase();
+    const successfulTools = new Set(
+      toolResults.filter((result) => result.ok).map((result) => result.name),
+    );
+    const failedTools = toolResults.filter((result) => !result.ok);
+
+    if (failedTools.length > 0 && this.containsSystemSuccessClaim(lower)) {
+      this.logger.warn(
+        `response.grounded_claim_blocked reason=tool_failed tools=${failedTools.map((result) => result.name).join(',')}`,
+      );
+      return "I couldn't check that in the system just now. Could you repeat the detail, or I can take a message for the team.";
+    }
+
+    if (
+      this.containsLookupSuccessClaim(lower) &&
+      !this.hasAnySuccessfulTool(successfulTools, [
+        'find_customer_by_phone',
+        'find_vehicle_by_rego',
+        'find_latest_booking_by_phone',
+        'create_customer',
+        'create_vehicle',
+        'create_booking',
+      ])
+    ) {
+      this.logger.warn('response.grounded_claim_blocked reason=lookup_claim');
+      return this.hasRegistrationOrPhone(transcript)
+        ? "I need to check that in the system first. Could you repeat the phone number or registration once more?"
+        : "I need to check that in the system first. What's the phone number or registration?";
+    }
+
+    if (
+      this.containsBookingConfirmedClaim(lower) &&
+      !successfulTools.has('create_booking')
+    ) {
+      this.logger.warn('response.grounded_claim_blocked reason=booking_claim');
+      return 'I cannot confirm the booking until it is created in the system. Can I confirm the preferred time first?';
+    }
+
+    if (
+      this.containsAvailabilityClaim(lower) &&
+      !this.hasAnySuccessfulTool(successfulTools, [
+        'check_booking_availability',
+        'create_booking',
+      ])
+    ) {
+      this.logger.warn(
+        'response.grounded_claim_blocked reason=availability_claim',
+      );
+      return 'I need to check live availability before offering a time. What day works best?';
+    }
+
+    if (
+      this.containsWorkshopHoursClaim(lower) &&
+      !this.hasAnySuccessfulTool(successfulTools, [
+        'get_workshop_info',
+        'check_service_hours',
+      ])
+    ) {
+      this.logger.warn('response.grounded_claim_blocked reason=hours_claim');
+      return "I need to check the workshop hours first. Which day would you like me to check?";
+    }
+
+    return text;
+  }
+
+  private containsSystemSuccessClaim(lower: string): boolean {
+    return (
+      this.containsLookupSuccessClaim(lower) ||
+      this.containsBookingConfirmedClaim(lower) ||
+      this.containsAvailabilityClaim(lower) ||
+      this.containsWorkshopHoursClaim(lower)
+    );
+  }
+
+  private containsLookupSuccessClaim(lower: string): boolean {
+    return /\b(i('|’)ve|i have|we have|found|located|pulled up|matched|see) (your|the|a)?\s*(details|customer|profile|record|car|vehicle|booking)\b|\b(in our system|on file|your customer record|your vehicle record)\b/.test(
+      lower,
+    );
+  }
+
+  private containsBookingConfirmedClaim(lower: string): boolean {
+    return /\b(booked|booking is confirmed|appointment is confirmed|appointment is set|you are booked|you’re booked|scheduled you|locked in)\b/.test(
+      lower,
+    );
+  }
+
+  private containsAvailabilityClaim(lower: string): boolean {
+    return /\b(we have|there is|there are|i have|available|availability|slot|slots)\b.*\b(morning|afternoon|\d{1,2}(:\d{2})?\s*(am|pm)?|available|slot|slots)\b/.test(
+      lower,
+    );
+  }
+
+  private containsWorkshopHoursClaim(lower: string): boolean {
+    return /\b(we are|we're|workshop is|shop is)\s+(open|closed)\b|\b(open from|open tomorrow|open today|closing at|closes at)\b/.test(
+      lower,
+    );
+  }
+
+  private hasAnySuccessfulTool(
+    successfulTools: Set<string>,
+    names: string[],
+  ): boolean {
+    return names.some((name) => successfulTools.has(name));
+  }
+
+  private hasRegistrationOrPhone(text: string): boolean {
+    return Boolean(
+      this.extractAustralianPhoneCandidate(text) ||
+        this.extractRegistrationCandidate(text),
+    );
+  }
+
+  private parseJsonObjectFromText(text: string): Record<string, unknown> | undefined {
+    const trimmed = text.trim();
+    const candidate = trimmed.startsWith('{')
+      ? trimmed
+      : trimmed.match(/\{[\s\S]*\}/)?.[0];
+
+    if (!candidate) {
+      return undefined;
+    }
+
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      return this.isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private looksLikeJsonOnly(text: string): boolean {
+    return /^\s*\{[\s\S]*\}\s*$/.test(text);
+  }
+
+  private normalizeJsonValue(value: unknown): unknown {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed || /^(null|undefined)$/i.test(trimmed)) {
+        return undefined;
+      }
+
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        return this.normalizeJsonValue(parsed);
+      } catch {
+        return trimmed;
+      }
+    }
+
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => this.normalizeJsonValue(item))
+        .filter((item) => item !== undefined);
+    }
+
+    if (this.isRecord(value)) {
+      return this.compactObject(
+        Object.fromEntries(
+          Object.entries(value).map(([key, item]) => [
+            key,
+            this.normalizeJsonValue(item),
+          ]),
+        ),
+      );
+    }
+
+    return value;
+  }
+
+  private compactObject(input: Record<string, unknown>): Record<string, unknown> {
+    return Object.fromEntries(
+      Object.entries(input).filter(([, value]) => value !== undefined),
+    );
+  }
+
+  private asString(value: unknown): string | undefined {
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  }
+
+  private isAllowedTool(task: TaskConfig, name: string): boolean {
+    return task.allowedTools.includes(name);
+  }
+
+  private createToolCall(
+    name: string,
+    args: unknown,
+    id?: string,
+  ): ToolCall {
+    return {
+      id: id ?? randomUUID(),
+      name,
+      arguments: args ?? {},
+    };
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
   private normalizeAssistantText(text: string, task: TaskConfig): string {
     const fallback = 'Done.';
+    if (this.looksLikeJsonOnly(text)) {
+      return 'I need a little more information to check that.';
+    }
+
     const compact =
       this.sanitizeAssistantPlainText(
         (text || fallback).replaceAll(this.callEndMarker, ''),

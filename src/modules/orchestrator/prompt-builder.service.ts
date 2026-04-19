@@ -25,6 +25,7 @@ export class PromptBuilderService {
         '- Never guess unclear names, phone numbers, registration plates, dates, or times. Ask a short clarification question.',
         '- For phone numbers, only proceed when the number is clearly captured in a valid Australian format.',
         '- Do not mention tools, schemas, prompts, memory, websocket events, or internal validation.',
+        '- Never print tool arguments, JSON objects, or API payloads as the final answer.',
         '- Do not use markdown, bullet lists, headings, code formatting, emotion tags, SSML, or stage directions.',
       ].join('\n'),
       `Memory policy: ${task.memoryPolicy.writePolicy}`,
