@@ -120,11 +120,15 @@ PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 TRANSCRIPT_COALESCING_ENABLED = env_bool("VOICE_TRANSCRIPT_COALESCING_ENABLED", True)
 TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "650"))
 TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS = int(
-    os.getenv("VOICE_TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS", "4000")
+    os.getenv("VOICE_TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS", "1200")
+)
+TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS = int(
+    os.getenv("VOICE_TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS", "4000")
 )
 TRANSCRIPT_MAX_COALESCE_MS = int(os.getenv("VOICE_TRANSCRIPT_MAX_COALESCE_MS", "12000"))
 TRANSCRIPT_MIN_FINAL_WORDS = int(os.getenv("VOICE_TRANSCRIPT_MIN_FINAL_WORDS", "5"))
 STT_QUEUE_MAX_SIZE = max(1, int(os.getenv("VOICE_STT_QUEUE_MAX_SIZE", "6")))
+GATEWAY_BLOCKING_PRELOAD = env_bool("VOICE_GATEWAY_BLOCKING_PRELOAD", True)
 
 WEBRTC_ICE_SERVERS_JSON = os.getenv("WEBRTC_ICE_SERVERS_JSON", "").strip()
 WEBRTC_STUN_URLS = os.getenv("WEBRTC_STUN_URLS", "").strip()
@@ -969,6 +973,23 @@ def transcript_word_count(text: str) -> int:
     return len(re.findall(r"\b[\w']+\b", text))
 
 
+def structured_digit_like_count(text: str) -> int:
+    lower = text.lower()
+    digit_count = len(re.findall(r"\d", lower))
+    words = re.findall(r"\b[a-z]+\b", lower)
+    word_count = 0
+
+    for word in words:
+        if word == "double":
+            word_count += 2
+        elif word == "triple":
+            word_count += 3
+        elif word in NUMBER_WORDS:
+            word_count += 1
+
+    return digit_count + word_count
+
+
 def looks_like_structured_transcript(text: str) -> bool:
     lower = text.lower()
     if re.search(
@@ -984,6 +1005,27 @@ def looks_like_structured_transcript(text: str) -> bool:
     words = re.findall(r"\b[a-z]+\b", lower)
     number_word_count = sum(1 for word in words if word in NUMBER_WORDS)
     return number_word_count >= 2
+
+
+def structured_transcript_likely_incomplete(text: str) -> bool:
+    lower = text.lower().strip()
+    digit_like_count = structured_digit_like_count(lower)
+    word_count = transcript_word_count(lower)
+    has_phone_context = bool(re.search(r"\b(phone|mobile|number)\b", lower))
+
+    if re.search(
+        r"\b(phone|mobile|number|rego|registration|plate|vin|postcode|address|is|it's|it is|double|triple|at|on|for)$",
+        lower,
+    ):
+        return True
+
+    if has_phone_context and digit_like_count < 8:
+        return True
+
+    if 0 < digit_like_count < 6:
+        return True
+
+    return word_count < 4
 
 
 def transcript_looks_complete(text: str) -> bool:
@@ -1762,21 +1804,6 @@ class VoiceSession:
             pending.metric.stt_ended_at = metric.stt_ended_at
 
         combined = join_transcript_fragments(self.pending_transcript.parts)
-        await self.send_browser_event(
-            {
-                "type": "gateway.transcript.pending",
-                "timestamp": now_iso(),
-                "payload": {
-                    "text": combined,
-                    "parts": len(self.pending_transcript.parts),
-                    "structured": self.pending_transcript.structured,
-                },
-            }
-        )
-
-        if self.pending_transcript_task:
-            self.pending_transcript_task.cancel()
-
         elapsed_coalesce_ms = int((now - self.pending_transcript.first_part_at) * 1000)
         should_commit_now = (
             transcript_looks_complete(combined)
@@ -1786,6 +1813,22 @@ class VoiceSession:
             )
         )
         delay_ms = 0 if should_commit_now else self.transcript_commit_delay_ms(combined)
+        await self.send_browser_event(
+            {
+                "type": "gateway.transcript.pending",
+                "timestamp": now_iso(),
+                "payload": {
+                    "text": combined,
+                    "parts": len(self.pending_transcript.parts),
+                    "structured": self.pending_transcript.structured,
+                    "delayMs": delay_ms,
+                    "incompleteStructured": (
+                        self.pending_transcript.structured
+                        and structured_transcript_likely_incomplete(combined)
+                    ),
+                },
+            }
+        )
         self.schedule_pending_transcript_commit(delay_ms)
 
     def schedule_pending_transcript_commit(self, delay_ms: int) -> None:
@@ -1797,6 +1840,8 @@ class VoiceSession:
 
     def transcript_commit_delay_ms(self, text: str) -> int:
         if looks_like_structured_transcript(text):
+            if structured_transcript_likely_incomplete(text):
+                return TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS
             return TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS
         return TRANSCRIPT_COMMIT_DELAY_MS
 
@@ -2249,13 +2294,19 @@ async def main() -> None:
             TTS_MAX_SPOKEN_CHARS_PER_TURN,
         )
 
+    should_preload = STT_PRELOAD or TTS_PRELOAD
+    if should_preload and GATEWAY_BLOCKING_PRELOAD:
+        logger.info("voice.preload.blocking.start")
+        await preload_models()
+        logger.info("voice.preload.blocking.end")
+
     async with websockets.serve(
         handle_signaling,
         HOST,
         PORT,
         max_size=16 * 1024 * 1024,
     ):
-        if STT_PRELOAD or TTS_PRELOAD:
+        if should_preload and not GATEWAY_BLOCKING_PRELOAD:
             asyncio.create_task(preload_models())
         await asyncio.Future()
 
