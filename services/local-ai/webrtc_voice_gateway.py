@@ -75,8 +75,9 @@ CHATTERBOX_TOP_K = int(os.getenv("LOCAL_CHATTERBOX_TOP_K", "1000"))
 CHATTERBOX_REPETITION_PENALTY = float(
     os.getenv("LOCAL_CHATTERBOX_REPETITION_PENALTY", "1.2")
 )
-CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.0"))
+CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.5"))
 CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
+CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
 
 INPUT_SAMPLE_RATE = 16000
 MIN_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_MIN_SPEECH_THRESHOLD", "0.025"))
@@ -318,11 +319,58 @@ def ensure_perth_watermarker() -> None:
     logger.info("voice.tts.chatterbox.perth_patched")
 
 
+class SilentTqdm:
+    def __init__(self, iterable: Any = None, *args: Any, **kwargs: Any):
+        self.iterable = iterable
+
+    def __iter__(self):
+        return iter(self.iterable if self.iterable is not None else [])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: Any) -> bool:
+        return False
+
+    def update(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def set_description(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def set_postfix(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def disable_chatterbox_progress_bars() -> None:
+    if CHATTERBOX_PROGRESS:
+        return
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+
+    try:
+        import tqdm
+        import tqdm.auto
+        import tqdm.std
+    except ImportError:
+        return
+
+    tqdm.tqdm = SilentTqdm
+    tqdm.auto.tqdm = SilentTqdm
+    tqdm.std.tqdm = SilentTqdm
+
+
 def get_chatterbox_model() -> Any:
     global chatterbox_model
 
     if chatterbox_model is not None:
         return chatterbox_model
+
+    disable_chatterbox_progress_bars()
 
     try:
         from chatterbox.tts_turbo import ChatterboxTurboTTS
