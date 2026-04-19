@@ -14,6 +14,7 @@ export class PromptBuilderService {
       ? session.memory.slice(-task.memoryPolicy.maxFactsInPrompt)
       : [];
     const recentHistory = session.history.slice(-8);
+    const confirmedDetails = this.confirmedDetailsSection(session);
 
     const systemSections = [
       task.systemPrompt,
@@ -38,6 +39,7 @@ export class PromptBuilderService {
             )
             .join('\n')}`
         : 'Relevant session memory: none.',
+      confirmedDetails,
       'Tool policy: use a tool only when it directly helps answer the current user request. Final answers must be plain text for the user.',
     ];
 
@@ -55,5 +57,53 @@ export class PromptBuilderService {
         content: currentUserText,
       },
     ];
+  }
+
+  private confirmedDetailsSection(session: SessionState): string {
+    const details = session.metadata?.confirmedDetails;
+    if (!this.isRecord(details)) {
+      return 'Confirmed session details: none.';
+    }
+
+    const lines = [
+      this.confirmedDetailLine(details.phone, 'phone'),
+      this.confirmedDetailLine(details.registration, 'registration'),
+      this.confirmedDetailLine(details.serviceType, 'service type'),
+      this.confirmedDetailLine(details.customerId, 'customer id'),
+      this.confirmedDetailLine(details.vehicleId, 'vehicle id'),
+    ].filter((line): line is string => Boolean(line));
+
+    return lines.length > 0
+      ? [
+          'Confirmed session details:',
+          ...lines.map((line) => `- ${line}`),
+          'Do not ask for these details again unless the caller corrects them.',
+        ].join('\n')
+      : 'Confirmed session details: none.';
+  }
+
+  private confirmedDetailLine(
+    value: unknown,
+    label: string,
+  ): string | undefined {
+    if (!this.isRecord(value)) {
+      return undefined;
+    }
+
+    const display =
+      typeof value.display === 'string' && value.display.trim()
+        ? value.display.trim()
+        : undefined;
+    const storedValue =
+      typeof value.value === 'string' && value.value.trim()
+        ? value.value.trim()
+        : undefined;
+
+    const text = display ?? storedValue;
+    return text ? `${label}: ${text}` : undefined;
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 }

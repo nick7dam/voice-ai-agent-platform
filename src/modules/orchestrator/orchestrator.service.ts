@@ -36,6 +36,22 @@ interface StructuredCaptureResult {
   toolsUsed: boolean;
 }
 
+interface ConfirmedDetail {
+  value: string;
+  display: string;
+  confirmedAt: string;
+}
+
+interface ConfirmedSessionDetails {
+  phone?: ConfirmedDetail;
+  registration?: ConfirmedDetail;
+  serviceType?: ConfirmedDetail;
+  customerId?: ConfirmedDetail;
+  vehicleId?: ConfirmedDetail;
+}
+
+type ConfirmedDetailKey = keyof ConfirmedSessionDetails;
+
 @Injectable()
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
@@ -110,6 +126,11 @@ export class OrchestratorService {
       const session = this.sessions.get(sessionId);
       const task = this.withRuntimeRequiredTools(
         this.tasks.get(session.taskKey, true),
+      );
+      this.captureObviousConfirmedDetails(
+        sessionId,
+        session,
+        trimmedTranscript,
       );
       const messages = this.prompts.build(session, task, trimmedTranscript);
       const tools = this.toolRegistry.toLlmTools(task.allowedTools);
@@ -224,6 +245,11 @@ export class OrchestratorService {
         shouldAskModelForTools = structuredCapture.askedModelForTools;
         toolsUsed = structuredCapture.toolsUsed;
         toolResultsForTurn.push(...structuredCapture.toolResults);
+        this.rememberToolResultDetails(
+          sessionId,
+          session,
+          structuredCapture.toolResults,
+        );
       } else {
         const deterministicToolCalls = this.buildDeterministicToolCalls(
           trimmedTranscript,
@@ -249,25 +275,26 @@ export class OrchestratorService {
           finalText = final.text;
           providerLatencyMs = final.providerLatencyMs;
           toolResultsForTurn.push(...final.toolResults);
+          this.rememberToolResultDetails(sessionId, session, final.toolResults);
         } else {
           const initial = shouldAskModelForTools
             ? await this.reasoning.generate({
-              messages,
-              tools,
-              temperature: 0.2,
-            })
-            : await this.reasoning.stream(
-              {
                 messages,
-                temperature: 0.15,
-              },
-              {
-                onTextDelta: (delta) => {
-                  ensureTurnCurrent();
-                  streamedText += delta;
-                  if (delta.trim()) {
-                    emitFirstToken('stream');
-                  }
+                tools,
+                temperature: 0.2,
+              })
+            : await this.reasoning.stream(
+                {
+                  messages,
+                  temperature: 0.15,
+                },
+                {
+                  onTextDelta: (delta) => {
+                    ensureTurnCurrent();
+                    streamedText += delta;
+                    if (delta.trim()) {
+                      emitFirstToken('stream');
+                    }
 
                     const chunks = this.extractSpeechChunks(
                       streamedText,
@@ -279,21 +306,21 @@ export class OrchestratorService {
                       speechCursor = chunk.endIndex;
                       emitSpeechTextChunk(chunk.text, false);
 
-                    if (
-                      this.tts.isEnabled() &&
-                      this.tts.shouldEmitEarlyAudio() &&
-                      this.sessions.isAudioOutputEnabled(sessionId)
-                    ) {
-                      if (this.tts.shouldStreamPhrases()) {
-                        queueEarlySpeech(chunk.text);
-                      } else if (!earlyAudioStarted) {
-                        queueEarlySpeech(chunk.text);
+                      if (
+                        this.tts.isEnabled() &&
+                        this.tts.shouldEmitEarlyAudio() &&
+                        this.sessions.isAudioOutputEnabled(sessionId)
+                      ) {
+                        if (this.tts.shouldStreamPhrases()) {
+                          queueEarlySpeech(chunk.text);
+                        } else if (!earlyAudioStarted) {
+                          queueEarlySpeech(chunk.text);
+                        }
                       }
                     }
-                  }
+                  },
                 },
-              },
-            );
+              );
 
           finalText = initial.text;
           providerLatencyMs = initial.latencyMs;
@@ -312,10 +339,11 @@ export class OrchestratorService {
             initial.toolCalls.length > 0
               ? initial.toolCalls
               : this.inferToolCallsFromAssistantText(
-                initial.text,
-                task,
-                trimmedTranscript,
-              );
+                  initial.text,
+                  task,
+                  trimmedTranscript,
+                  session,
+                );
 
           if (inferredToolCalls.length > 0) {
             toolsUsed = true;
@@ -337,6 +365,11 @@ export class OrchestratorService {
             finalText = final.text;
             providerLatencyMs += final.providerLatencyMs;
             toolResultsForTurn.push(...final.toolResults);
+            this.rememberToolResultDetails(
+              sessionId,
+              session,
+              final.toolResults,
+            );
           }
         }
       }
@@ -356,7 +389,11 @@ export class OrchestratorService {
         trimmedTranscript,
         toolResultsForTurn,
       );
-      const safeText = this.normalizeAssistantText(groundedText, task);
+      const nonRepeatingText = this.avoidRepeatedKnownQuestions(
+        groundedText,
+        session,
+      );
+      const safeText = this.normalizeAssistantText(nonRepeatingText, task);
       const totalLatencyMs = elapsedMs(startedAt);
       this.sessions.appendHistory(sessionId, {
         role: 'assistant',
@@ -443,6 +480,322 @@ export class OrchestratorService {
     }
   }
 
+  private captureObviousConfirmedDetails(
+    sessionId: string,
+    session: SessionState,
+    transcript: string,
+  ): void {
+    const serviceType = this.inferServiceType(transcript);
+    if (!serviceType) {
+      return;
+    }
+
+    const display = this.serviceTypeDisplay(serviceType);
+    this.rememberConfirmedDetail(
+      sessionId,
+      session,
+      'serviceType',
+      serviceType,
+      display,
+      `Confirmed service type: ${display}.`,
+    );
+  }
+
+  private rememberStructuredCaptureConfirmation(
+    sessionId: string,
+    session: SessionState,
+    capture: StructuredCaptureState,
+  ): void {
+    if (capture.field === 'phone') {
+      this.rememberConfirmedDetail(
+        sessionId,
+        session,
+        'phone',
+        capture.value,
+        capture.display,
+        `Confirmed phone number: ${capture.display}.`,
+      );
+      return;
+    }
+
+    this.rememberConfirmedDetail(
+      sessionId,
+      session,
+      'registration',
+      capture.value.toUpperCase(),
+      capture.display,
+      `Confirmed registration: ${capture.display}.`,
+    );
+  }
+
+  private rememberToolResultDetails(
+    sessionId: string,
+    session: SessionState,
+    results: NormalizedToolResult[],
+  ): void {
+    for (const result of results) {
+      if (!result.ok || !this.isRecord(result.output)) {
+        continue;
+      }
+
+      if (
+        result.name === 'find_customer_by_phone' ||
+        result.name === 'create_customer'
+      ) {
+        const phone = this.extractPhoneFromToolOutput(result.output);
+        if (phone) {
+          this.rememberConfirmedDetail(
+            sessionId,
+            session,
+            'phone',
+            phone.value,
+            phone.display,
+            `Confirmed phone number: ${phone.display}.`,
+          );
+        }
+
+        const customerId = this.extractEntityId(result.output, 'customer');
+        if (customerId) {
+          this.rememberConfirmedDetail(
+            sessionId,
+            session,
+            'customerId',
+            customerId,
+            customerId,
+            `Confirmed customer id: ${customerId}.`,
+          );
+        }
+      }
+
+      if (
+        result.name === 'find_vehicle_by_rego' ||
+        result.name === 'create_vehicle'
+      ) {
+        const registration = this.asString(result.output.registration);
+        if (registration) {
+          const normalized = registration.toUpperCase();
+          this.rememberConfirmedDetail(
+            sessionId,
+            session,
+            'registration',
+            normalized,
+            this.spokenRegistrationForConfirmation(normalized),
+            `Confirmed registration: ${this.spokenRegistrationForConfirmation(normalized)}.`,
+          );
+        }
+
+        const vehicleId = this.extractEntityId(result.output, 'vehicle');
+        if (vehicleId) {
+          this.rememberConfirmedDetail(
+            sessionId,
+            session,
+            'vehicleId',
+            vehicleId,
+            vehicleId,
+            `Confirmed vehicle id: ${vehicleId}.`,
+          );
+        }
+      }
+    }
+  }
+
+  private rememberConfirmedDetail(
+    sessionId: string,
+    session: SessionState,
+    key: ConfirmedDetailKey,
+    value: string,
+    display: string,
+    memoryFact: string,
+  ): boolean {
+    const normalizedValue = value.trim();
+    const normalizedDisplay = display.trim();
+    if (!normalizedValue || !normalizedDisplay) {
+      return false;
+    }
+
+    const confirmed = this.getConfirmedDetails(session);
+    const existing = confirmed[key];
+    if (
+      existing?.value === normalizedValue &&
+      existing.display === normalizedDisplay
+    ) {
+      return false;
+    }
+
+    this.setConfirmedDetail(session, key, {
+      value: normalizedValue,
+      display: normalizedDisplay,
+      confirmedAt: nowIso(),
+    });
+    this.sessions.addMemoryFact(sessionId, memoryFact, 'confirmed_detail');
+    this.logger.log(
+      `session.confirmed_detail session=${sessionId} key=${key} value=${normalizedValue}`,
+    );
+    return true;
+  }
+
+  private getConfirmedDetails(session: SessionState): ConfirmedSessionDetails {
+    const details = session.metadata?.confirmedDetails;
+    if (!this.isRecord(details)) {
+      return {};
+    }
+
+    return {
+      phone: this.asConfirmedDetail(details.phone),
+      registration: this.asConfirmedDetail(details.registration),
+      serviceType: this.asConfirmedDetail(details.serviceType),
+      customerId: this.asConfirmedDetail(details.customerId),
+      vehicleId: this.asConfirmedDetail(details.vehicleId),
+    };
+  }
+
+  private setConfirmedDetail(
+    session: SessionState,
+    key: ConfirmedDetailKey,
+    detail: ConfirmedDetail,
+  ): void {
+    const existing = this.getConfirmedDetails(session);
+    session.metadata = {
+      ...(session.metadata ?? {}),
+      confirmedDetails: {
+        ...existing,
+        [key]: detail,
+      },
+    };
+  }
+
+  private asConfirmedDetail(value: unknown): ConfirmedDetail | undefined {
+    if (!this.isRecord(value)) {
+      return undefined;
+    }
+
+    const detailValue = this.asString(value.value);
+    const display = this.asString(value.display);
+    if (!detailValue || !display) {
+      return undefined;
+    }
+
+    return {
+      value: detailValue,
+      display,
+      confirmedAt: this.asString(value.confirmedAt) ?? nowIso(),
+    };
+  }
+
+  private extractPhoneFromToolOutput(
+    output: Record<string, unknown>,
+  ): { value: string; display: string } | undefined {
+    const phone = output.phone;
+    if (!this.isRecord(phone)) {
+      return undefined;
+    }
+
+    const value = this.asString(phone.e164);
+    const display =
+      this.asString(phone.display) ??
+      this.spokenPhoneForConfirmation(this.asString(phone.nationalDigits));
+
+    return value && display ? { value, display } : undefined;
+  }
+
+  private extractEntityId(
+    output: Record<string, unknown>,
+    entityKey: 'customer' | 'vehicle',
+  ): string | undefined {
+    return (
+      this.extractId(output[entityKey]) ??
+      this.extractId(output.data) ??
+      this.extractId(output)
+    );
+  }
+
+  private extractId(value: unknown): string | undefined {
+    if (!this.isRecord(value)) {
+      return undefined;
+    }
+
+    const direct =
+      this.asString(value.id) ??
+      this.asString(value.uuid) ??
+      this.asString(value.customerId) ??
+      this.asString(value.customer_id) ??
+      this.asString(value.vehicleId) ??
+      this.asString(value.vehicle_id);
+    if (direct) {
+      return direct;
+    }
+
+    if (typeof value.id === 'number' && Number.isFinite(value.id)) {
+      return String(value.id);
+    }
+
+    return undefined;
+  }
+
+  private avoidRepeatedKnownQuestions(
+    text: string,
+    session: SessionState,
+  ): string {
+    const confirmed = this.getConfirmedDetails(session);
+
+    if (confirmed.phone && this.asksForPhone(text)) {
+      return `I have your phone number confirmed. ${this.nextMissingDetailQuestion(confirmed)}`;
+    }
+
+    if (confirmed.registration && this.asksForRegistration(text)) {
+      return `I have registration ${confirmed.registration.display} confirmed. ${this.nextMissingDetailQuestion(confirmed)}`;
+    }
+
+    if (confirmed.serviceType && this.asksForServiceType(text)) {
+      return `I have ${confirmed.serviceType.display} noted. ${this.nextMissingDetailQuestion(confirmed)}`;
+    }
+
+    return text;
+  }
+
+  private asksForPhone(text: string): boolean {
+    return (
+      /\b(phone|mobile|contact number|best number)\b[^?]{0,100}\?/i.test(
+        text,
+      ) ||
+      /\b(can i|get|have|what'?s|what is|confirm|repeat)\b[^?]{0,80}\b(number)\b[^?]{0,40}\?/i.test(
+        text,
+      )
+    );
+  }
+
+  private asksForRegistration(text: string): boolean {
+    return /\b(rego|registration|plate|licen[cs]e plate)\b[^?]{0,100}\?/i.test(
+      text,
+    );
+  }
+
+  private asksForServiceType(text: string): boolean {
+    return /\b(what type of service|which service|what service|service do you need|what are we booking|what can we book)\b/i.test(
+      text,
+    );
+  }
+
+  private nextMissingDetailQuestion(details: ConfirmedSessionDetails): string {
+    if (!details.serviceType) {
+      return 'What type of service do you need?';
+    }
+
+    if (!details.phone) {
+      return "What's the best phone number?";
+    }
+
+    if (!details.registration) {
+      return "What's the vehicle registration?";
+    }
+
+    return 'What day works best for the booking?';
+  }
+
+  private serviceTypeDisplay(serviceType: string): string {
+    return serviceType.replace(/_/g, ' ');
+  }
+
   private async handleStructuredCaptureTurn(
     sessionId: string,
     turnId: string,
@@ -457,6 +810,7 @@ export class OrchestratorService {
     if (pending) {
       if (this.isAffirmative(transcript)) {
         this.clearStructuredCapture(session);
+        this.rememberStructuredCaptureConfirmation(sessionId, session, pending);
         const toolName =
           pending.field === 'phone'
             ? 'find_customer_by_phone'
@@ -545,10 +899,15 @@ export class OrchestratorService {
     forcedField?: StructuredCaptureField,
   ): StructuredCaptureState | undefined {
     const context = this.getStructuredCaptureContext(transcript, session);
+    const confirmed = this.getConfirmedDetails(session);
 
     if (forcedField === 'phone' || (!forcedField && context.phone)) {
       const phone = this.parseSpokenAustralianPhone(transcript);
       if (phone.ok) {
+        if (!forcedField && confirmed.phone?.value === phone.e164) {
+          return undefined;
+        }
+
         return {
           field: 'phone',
           value: phone.e164 ?? '',
@@ -570,6 +929,14 @@ export class OrchestratorService {
     ) {
       const registration = this.parseSpokenRegistration(transcript, context);
       if (registration) {
+        if (
+          !forcedField &&
+          confirmed.registration?.value.toUpperCase() ===
+            registration.toUpperCase()
+        ) {
+          return undefined;
+        }
+
         return {
           field: 'registration',
           value: registration,
@@ -821,6 +1188,7 @@ export class OrchestratorService {
     session: SessionState,
   ): ToolCall[] {
     const lower = transcript.toLowerCase();
+    const confirmed = this.getConfirmedDetails(session);
     const calls: ToolCall[] = [];
 
     if (this.isAllowedTool(task, 'get_workshop_info')) {
@@ -834,9 +1202,10 @@ export class OrchestratorService {
       calls.length === 0 &&
       this.isAllowedTool(task, 'check_booking_availability')
     ) {
-      const serviceType = this.inferServiceType(
-        `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
-      );
+      const transcriptContext = `${session.history.map((item) => item.text).join(' ')} ${transcript}`;
+      const serviceType =
+        confirmed.serviceType?.value ??
+        this.inferServiceType(transcriptContext);
       const lastAssistant = [...session.history]
         .reverse()
         .find((item) => item.role === 'assistant')?.text;
@@ -856,12 +1225,11 @@ export class OrchestratorService {
             'check_booking_availability',
             this.compactObject({
               serviceType,
-              date: this.inferDatePreference(
-                `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
-              ),
-              preferredTimeOfDay: this.inferPreferredTimeOfDay(
-                `${session.history.map((item) => item.text).join(' ')} ${transcript}`,
-              ),
+              date: this.inferDatePreference(transcriptContext),
+              preferredTimeOfDay:
+                this.inferPreferredTimeOfDay(transcriptContext),
+              customerId: confirmed.customerId?.value,
+              vehicleId: confirmed.vehicleId?.value,
             }),
           ),
         );
@@ -881,6 +1249,7 @@ export class OrchestratorService {
     text: string,
     task: TaskConfig,
     transcript: string,
+    session: SessionState,
   ): ToolCall[] {
     const parsed = this.parseJsonObjectFromText(text);
     if (!parsed) {
@@ -896,6 +1265,7 @@ export class OrchestratorService {
       const bookingArgs = this.inferBookingAvailabilityArgsFromJson(
         parsed,
         transcript,
+        session,
       );
       if (bookingArgs) {
         return [this.createToolCall('check_booking_availability', bookingArgs)];
@@ -955,10 +1325,10 @@ export class OrchestratorService {
         name,
         this.normalizeJsonValue(
           parsed.arguments ??
-          parsed.args ??
-          parsed.input ??
-          parsed.parameters ??
-          {},
+            parsed.args ??
+            parsed.input ??
+            parsed.parameters ??
+            {},
         ),
       ),
     ];
@@ -967,10 +1337,14 @@ export class OrchestratorService {
   private inferBookingAvailabilityArgsFromJson(
     parsed: Record<string, unknown>,
     transcript: string,
+    session: SessionState,
   ): Record<string, unknown> | undefined {
-    const serviceType = this.inferServiceType(
-      String(parsed.serviceType ?? parsed.service_type ?? transcript),
-    );
+    const confirmed = this.getConfirmedDetails(session);
+    const serviceType =
+      confirmed.serviceType?.value ??
+      this.inferServiceType(
+        String(parsed.serviceType ?? parsed.service_type ?? transcript),
+      );
     const hasBookingShape = [
       'serviceType',
       'service_type',
@@ -999,8 +1373,12 @@ export class OrchestratorService {
       preferredTimeOfDay: this.inferPreferredTimeOfDay(
         `${transcript} ${JSON.stringify(parsed)}`,
       ),
-      customerId: this.asString(record.customerId ?? record.customer_id),
-      vehicleId: this.asString(record.vehicleId ?? record.vehicle_id),
+      customerId:
+        this.asString(record.customerId ?? record.customer_id) ??
+        confirmed.customerId?.value,
+      vehicleId:
+        this.asString(record.vehicleId ?? record.vehicle_id) ??
+        confirmed.vehicleId?.value,
       slotStart: this.asString(record.slotStart ?? record.slot_start),
     });
   }
