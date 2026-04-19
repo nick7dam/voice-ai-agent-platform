@@ -1343,7 +1343,7 @@ export class OrchestratorService {
     const serviceType =
       confirmed.serviceType?.value ??
       this.inferServiceType(
-        String(parsed.serviceType ?? parsed.service_type ?? transcript),
+        this.asString(parsed.serviceType ?? parsed.service_type) ?? transcript,
       );
     const hasBookingShape = [
       'serviceType',
