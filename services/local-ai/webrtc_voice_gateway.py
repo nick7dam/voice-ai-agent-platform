@@ -319,32 +319,6 @@ def ensure_perth_watermarker() -> None:
     logger.info("voice.tts.chatterbox.perth_patched")
 
 
-class SilentTqdm:
-    def __init__(self, iterable: Any = None, *args: Any, **kwargs: Any):
-        self.iterable = iterable
-
-    def __iter__(self):
-        return iter(self.iterable if self.iterable is not None else [])
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args: Any) -> bool:
-        return False
-
-    def update(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    def close(self) -> None:
-        return None
-
-    def set_description(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    def set_postfix(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
 def disable_chatterbox_progress_bars() -> None:
     if CHATTERBOX_PROGRESS:
         return
@@ -358,6 +332,13 @@ def disable_chatterbox_progress_bars() -> None:
         import tqdm.std
     except ImportError:
         return
+
+    base_tqdm = tqdm.std.tqdm
+
+    class SilentTqdm(base_tqdm):
+        def __init__(self, *args: Any, **kwargs: Any):
+            kwargs["disable"] = True
+            super().__init__(*args, **kwargs)
 
     tqdm.tqdm = SilentTqdm
     tqdm.auto.tqdm = SilentTqdm
