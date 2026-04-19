@@ -292,6 +292,32 @@ def get_tts_pipeline(lang_code: str) -> Any:
     return pipeline
 
 
+def ensure_perth_watermarker() -> None:
+    try:
+        import perth
+    except ImportError as exc:
+        raise RuntimeError(
+            "Chatterbox requires resemble-perth. Install it with "
+            "`pip install resemble-perth` in the Chatterbox voice environment."
+        ) from exc
+
+    if callable(getattr(perth, "PerthImplicitWatermarker", None)):
+        return
+
+    try:
+        from perth.perth_net.perth_net_implicit.perth_watermarker import (
+            PerthImplicitWatermarker,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "resemble-perth is installed, but the real "
+            "PerthImplicitWatermarker implementation could not be imported."
+        ) from exc
+
+    perth.PerthImplicitWatermarker = PerthImplicitWatermarker
+    logger.info("voice.tts.chatterbox.perth_patched")
+
+
 def get_chatterbox_model() -> Any:
     global chatterbox_model
 
@@ -314,6 +340,7 @@ def get_chatterbox_model() -> Any:
         resolve_tts_device(),
         bool(CHATTERBOX_AUDIO_PROMPT_PATH),
     )
+    ensure_perth_watermarker()
     model = ChatterboxTurboTTS.from_pretrained(device=resolve_tts_device())
     audio_prompt = CHATTERBOX_AUDIO_PROMPT_PATH
 
