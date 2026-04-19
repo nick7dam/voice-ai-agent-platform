@@ -3,10 +3,14 @@ import { APP_CONFIG } from '../../common/constants/injection-tokens';
 import { requestText } from '../../common/utils/http-client';
 import { describeNetworkError } from '../../common/utils/network-error';
 import type { AppConfig } from '../../config/app.config';
+import { BookingApiClient } from '../tools/booking-api/booking-api.client';
 
 @Controller('health')
 export class HealthController {
-  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+  constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    private readonly bookingApi: BookingApiClient,
+  ) {}
 
   @Get()
   async getHealth() {
@@ -22,6 +26,8 @@ export class HealthController {
       this.config.tts.enabled && this.config.tts.provider === 'local_kokoro'
         ? await this.checkLocalService(`${this.config.tts.localBaseUrl}/health`)
         : { reachable: false, skipped: true };
+    const bookingApiReachability =
+      await this.bookingApi.checkReachability();
 
     return {
       status: 'ok',
@@ -83,6 +89,15 @@ export class HealthController {
         estimatedPricePerMillionChars:
           this.config.tts.estimatedPricePerMillionChars,
         error: ttsReachability.error,
+      },
+      bookingApi: {
+        configured: this.config.bookingApi.configured,
+        reachable: bookingApiReachability.reachable,
+        skipped: bookingApiReachability.skipped,
+        baseUrl: this.config.bookingApi.baseUrl,
+        healthPath: this.config.bookingApi.healthPath,
+        hasApiKey: this.config.bookingApi.apiKey.trim().length > 0,
+        error: bookingApiReachability.error,
       },
     };
   }

@@ -4,6 +4,17 @@ import {
   LlmToolDefinition,
   ToolDefinition,
 } from '../../common/types/tool.types';
+import {
+  CheckBookingAvailabilityTool,
+  CreateBookingTool,
+  CreateCustomerTool,
+  CreateEscalationTool,
+  CreateVehicleTool,
+  FindCustomerByPhoneTool,
+  FindLatestBookingByPhoneTool,
+  FindVehicleByRegoTool,
+  GetWorkshopInfoTool,
+} from './tools/booking-api-tools';
 import { CalculateExpressionTool } from './tools/calculate-expression.tool';
 import { CaptureCustomerDetailsTool } from './tools/capture-customer-details.tool';
 import { CheckServiceAvailabilityTool } from './tools/check-service-availability.tool';
@@ -30,6 +41,15 @@ export class ToolRegistryService {
     captureCustomerDetails: CaptureCustomerDetailsTool,
     checkServiceAvailability: CheckServiceAvailabilityTool,
     createServiceBooking: CreateServiceBookingTool,
+    getWorkshopInfo: GetWorkshopInfoTool,
+    findCustomerByPhone: FindCustomerByPhoneTool,
+    createCustomer: CreateCustomerTool,
+    findVehicleByRego: FindVehicleByRegoTool,
+    createVehicle: CreateVehicleTool,
+    findLatestBookingByPhone: FindLatestBookingByPhoneTool,
+    checkBookingAvailability: CheckBookingAvailabilityTool,
+    createBooking: CreateBookingTool,
+    createEscalation: CreateEscalationTool,
   ) {
     const definitions = [
       getCurrentTime.definition,
@@ -42,6 +62,15 @@ export class ToolRegistryService {
       captureCustomerDetails.definition,
       checkServiceAvailability.definition,
       createServiceBooking.definition,
+      getWorkshopInfo.definition,
+      findCustomerByPhone.definition,
+      createCustomer.definition,
+      findVehicleByRego.definition,
+      createVehicle.definition,
+      findLatestBookingByPhone.definition,
+      checkBookingAvailability.definition,
+      createBooking.definition,
+      createEscalation.definition,
     ];
 
     this.tools = new Map(definitions.map((tool) => [tool.name, tool]));

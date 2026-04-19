@@ -60,6 +60,13 @@ export interface AppConfig {
     think: boolean;
     configured: boolean;
   };
+  bookingApi: {
+    baseUrl: string;
+    apiKey: string;
+    timeoutMs: number;
+    healthPath: string;
+    configured: boolean;
+  };
 }
 
 export function loadAppConfig(): AppConfig {
@@ -136,6 +143,15 @@ export function loadAppConfig(): AppConfig {
       configured:
         env.OLLAMA_BASE_URL.trim().length > 0 &&
         env.OLLAMA_MODEL.trim().length > 0,
+    },
+    bookingApi: {
+      baseUrl: env.BOOKING_API_BASE_URL.replace(/\/$/, ''),
+      apiKey: env.BOOKING_API_KEY,
+      timeoutMs: env.BOOKING_API_TIMEOUT_MS,
+      healthPath: env.BOOKING_API_HEALTH_PATH.startsWith('/')
+        ? env.BOOKING_API_HEALTH_PATH
+        : `/${env.BOOKING_API_HEALTH_PATH}`,
+      configured: env.BOOKING_API_BASE_URL.trim().length > 0,
     },
   };
 }

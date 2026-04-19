@@ -13,6 +13,7 @@ browser or CLI audio input
 -> buffered turn transcription with local faster-whisper
 -> prompt builder with purpose + session memory + recent history
 -> Ollama reasoning with local tool calling
+-> optional booking API tools on http://127.0.0.1:8000
 -> plain text assistant response over WebSocket
 -> optional local Kokoro speech playback
 ```
@@ -33,7 +34,7 @@ In WebRTC mode there are no per-turn HTTP calls to `/transcribe`,
 `/synthesize`, or `/synthesize/stream`. Nest still talks to Ollama through
 Ollama's local HTTP API.
 
-The primary assistant response is always emitted as plain text inside structured JSON websocket events. Local text-to-speech is optional and runs behind the same modular output boundary. There is no telephony, Laravel integration, or external business backend in this MVP.
+The primary assistant response is always emitted as plain text inside structured JSON websocket events. Local text-to-speech is optional and runs behind the same modular output boundary. There is no telephony. The car booking backend is integrated through a configurable tool connector, so the core voice platform can still be reused for other domains.
 
 ## Architecture
 
@@ -97,6 +98,11 @@ OLLAMA_NUM_PREDICT=120
 OLLAMA_NUM_CTX=2048
 OLLAMA_KEEP_ALIVE=30m
 OLLAMA_THINK=false
+
+BOOKING_API_BASE_URL=http://127.0.0.1:8000
+BOOKING_API_KEY=
+BOOKING_API_TIMEOUT_MS=10000
+BOOKING_API_HEALTH_PATH=/workshop/services
 
 TTS_PROVIDER=local_kokoro
 TTS_ENABLED=true
@@ -523,17 +529,35 @@ src/modules/orchestrator/prompt-builder.service.ts
 
 ## Tools
 
-Demo tools:
+Built-in utility tools:
 
 - `get_current_time`
-- `check_service_hours`
-- `get_service_location`
-- `check_service_availability`
-- `create_service_booking`
 - `remember_fact`
 - `list_memory`
 
-Each tool has a name, description, Zod input schema, JSON-schema-like parameters for the LLM, and a deterministic `execute()` method. The car service tools are local demo tools; they do not call a real calendar or external business backend yet.
+Car service API tools:
+
+- `get_workshop_info`
+- `find_customer_by_phone`
+- `create_customer`
+- `find_vehicle_by_rego`
+- `create_vehicle`
+- `find_latest_booking_by_phone`
+- `check_booking_availability`
+- `create_booking`
+- `create_escalation`
+
+These tools call the booking API configured by `BOOKING_API_BASE_URL`, defaulting to `http://127.0.0.1:8000`. If the API needs auth, set `BOOKING_API_KEY`; it is sent as `X-API-Key`.
+
+The connector mirrors the imported receptionist backend endpoints:
+
+- `GET /workshop/hours`, `GET /workshop/today-hours`, `GET /workshop/services`, `GET /workshop/address`
+- `GET /customers/search?phone=...`, `POST /customers`
+- `GET /vehicles/search?rego=...`, `POST /vehicles`
+- `GET /bookings/search?phone=...`, `POST /bookings/check-availability`, `POST /bookings`
+- `POST /escalations`
+
+Each tool has a name, description, Zod input schema, JSON-schema-like parameters for the LLM, and a deterministic `execute()` method. The older local demo car-service tools remain registered for local experiments, but the default receptionist task now uses the API-backed tools.
 
 Add future tools under:
 

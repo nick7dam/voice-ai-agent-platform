@@ -61,6 +61,10 @@ export const envSchema = z.object({
   OLLAMA_NUM_CTX: z.coerce.number().int().positive().default(2048),
   OLLAMA_KEEP_ALIVE: z.string().min(1).default('30m'),
   OLLAMA_THINK: booleanFromEnv.default(false),
+  BOOKING_API_BASE_URL: z.string().url().default('http://127.0.0.1:8000'),
+  BOOKING_API_KEY: z.string().default(''),
+  BOOKING_API_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  BOOKING_API_HEALTH_PATH: z.string().min(1).default('/workshop/services'),
   DEFAULT_TASK_KEY: z.string().min(1).default('general_voice_assistant'),
   TASK_CONFIG_PATH: z.string().min(1).default('data/tasks.local.json'),
   MAX_AUDIO_BUFFER_BYTES: z.coerce

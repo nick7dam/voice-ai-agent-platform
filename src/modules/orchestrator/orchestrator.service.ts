@@ -512,6 +512,9 @@ export class OrchestratorService {
       /\b(name is|my name|phone|mobile|number is|rego|registration|plate|license plate|licence plate)\b/.test(
         lower,
       ) ||
+      /\b(customer|email|booking reference|existing booking|latest booking|human|manager|complaint|urgent|emergency|escalate)\b/.test(
+        lower,
+      ) ||
       /\b(service|logbook|oil change|brake|brakes|tyre|tire|roadworthy|diagnostic|inspection|rego|vehicle|car)\b/.test(
         lower,
       )
