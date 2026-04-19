@@ -1554,7 +1554,8 @@ class VoiceSession:
             return
 
         first_phrase = self.spoken_chars_by_turn.get(turn_id, 0) == 0
-        phrases = split_text_for_tts_queue(text, first_phrase)
+        queue_text = normalize_text_for_speech(text) if is_chatterbox_engine() else text
+        phrases = split_text_for_tts_queue(queue_text, first_phrase)
         queued = 0
         queued_chars = 0
 
