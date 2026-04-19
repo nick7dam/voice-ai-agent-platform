@@ -151,6 +151,20 @@ Run the gateway:
 NEST_WS_URL=ws://127.0.0.1:3000/realtime pnpm local:voice:cuda
 ```
 
+To test Chatterbox Turbo, use `services/local-ai/requirements-voice-chatterbox.txt`
+in a separate `.venv-voice-chatterbox` environment and run:
+
+```bash
+LOCAL_TTS_ENGINE=chatterbox_turbo \
+LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH=/absolute/path/to/reference-voice.wav \
+NEST_WS_URL=ws://127.0.0.1:3000/realtime \
+pnpm local:voice:chatterbox:cuda
+```
+
+The gateway keeps Chatterbox emotion tags out of the visible assistant text. It
+adds small TTS-only cues such as `[chuckle]` only when
+`LOCAL_CHATTERBOX_EMOTION_TAGS=true`.
+
 The gateway listens on `VOICE_GATEWAY_PORT` (`8004` by default). The browser
 uses a WebSocket only for WebRTC signaling; STT and TTS run in-process inside
 `webrtc_voice_gateway.py`, so you should no longer see `/transcribe` or

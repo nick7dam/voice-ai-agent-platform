@@ -42,7 +42,7 @@ const stateNames: Record<string, string> = {
 const callEndMarker = '[[END_CALL]]';
 
 export function normalizeTextForSpeech(text: string): string {
-  return stripSpeechAsides(text)
+  return stripSpeechAsides(stripParalinguisticTags(text))
     .replace(
       /\b([01]?\d|2[0-3]):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?\b/gi,
       (_match: string, hour: string, minute: string, meridiem?: string) =>
@@ -71,8 +71,16 @@ export function normalizeTextForSpeech(text: string): string {
     )
     .replace(/&/g, 'and')
     .replace(/@/g, ' at ')
+    .replace(/\s+([.,!?;:])/g, '$1')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function stripParalinguisticTags(text: string): string {
+  return text.replace(
+    /\s*\[(?:laugh|laughter|chuckle|cough|sigh|gasp|breath|sniff|clear throat|clears throat)\]\s*/gi,
+    ' ',
+  );
 }
 
 export function stripSpeechAsides(text: string): string {

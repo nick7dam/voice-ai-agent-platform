@@ -461,6 +461,10 @@ export class OrchestratorService {
       .replace(/\*\*([^*]+)\*\*/g, '$1')
       .replace(/\*([^*]+)\*/g, '$1')
       .replace(
+        /\[(?:laugh|laughter|chuckle|cough|sigh|gasp|breath|sniff|clear throat|clears throat)\]/gi,
+        ' ',
+      )
+      .replace(
         /\b(?:I am|I'm) (?:using|calling) (?:a )?(?:tool|function)[^.?!]*[.?!]?/gi,
         "I'll check that.",
       )
@@ -468,6 +472,7 @@ export class OrchestratorService {
         /\b(?:tool|schema|prompt|websocket|memory store|validation error)\b/gi,
         '',
       )
+      .replace(/\s+([.,!?;:])/g, '$1')
       .replace(/\s+/g, ' ')
       .trim();
   }

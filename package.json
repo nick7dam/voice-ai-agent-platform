@@ -20,6 +20,7 @@
     "local:tts:cuda": "LOCAL_TTS_DEVICE=cuda LOCAL_TTS_PRELOAD=true .venv-tts/bin/python services/local-ai/tts_server.py",
     "local:voice": ".venv-voice/bin/python services/local-ai/webrtc_voice_gateway.py",
     "local:voice:cuda": "LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_TTS_DEVICE=cuda LOCAL_STT_LANGUAGE=en LD_LIBRARY_PATH=$(./.venv-voice/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-voice/bin/python services/local-ai/webrtc_voice_gateway.py",
+    "local:voice:chatterbox:cuda": "LOCAL_TTS_ENGINE=chatterbox_turbo LOCAL_STT_DEVICE=cuda LOCAL_STT_COMPUTE_TYPE=float16 LOCAL_TTS_DEVICE=cuda LOCAL_STT_LANGUAGE=en LD_LIBRARY_PATH=$(./.venv-voice-chatterbox/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-voice-chatterbox/bin/python services/local-ai/webrtc_voice_gateway.py",
     "lint": "eslint \"{src,apps,libs,test,scripts}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",

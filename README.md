@@ -192,7 +192,7 @@ See `services/local-ai/README.md` for more local model details.
 ## WebRTC Voice Gateway
 
 The WebRTC gateway replaces the separate STT/TTS HTTP services for browser
-voice. It keeps Whisper and Kokoro loaded in one long-lived Python process,
+voice. It keeps Whisper and the selected local TTS engine loaded in one long-lived Python process,
 receives browser microphone audio as a WebRTC track, sends recognized text to
 Nest over `/realtime`, then streams synthesized audio back as a WebRTC audio
 track.
@@ -217,6 +217,31 @@ Run the gateway on an NVIDIA host:
 ```bash
 NEST_WS_URL=ws://127.0.0.1:3000/realtime pnpm local:voice:cuda
 ```
+
+Kokoro is the default gateway TTS engine. To try Resemble Chatterbox Turbo, use a
+separate venv because Chatterbox pins different `torch` and `transformers`
+versions:
+
+```bash
+python3.10 -m venv .venv-voice-chatterbox
+. .venv-voice-chatterbox/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install -r services/local-ai/requirements-voice-chatterbox.txt
+deactivate
+```
+
+Then run:
+
+```bash
+LOCAL_TTS_ENGINE=chatterbox_turbo \
+LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH=/absolute/path/to/reference-voice.wav \
+NEST_WS_URL=ws://127.0.0.1:3000/realtime \
+pnpm local:voice:chatterbox:cuda
+```
+
+The Chatterbox path keeps the assistant response text plain. The gateway may add
+small TTS-only paralinguistic cues such as `[chuckle]` to the audio prompt when
+`LOCAL_CHATTERBOX_EMOTION_TAGS=true`; those tags are not sent to chat history.
 
 Then open `http://localhost:3000`, use **Start WebRTC voice**, and leave the old
 **Start live mic** button alone. The old WebSocket voice path remains available

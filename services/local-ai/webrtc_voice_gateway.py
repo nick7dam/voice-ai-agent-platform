@@ -24,7 +24,13 @@ from aiortc import (
 from av import AudioFrame
 from av.audio.resampler import AudioResampler
 from faster_whisper import WhisperModel
-from kokoro import KPipeline
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 HOST = os.getenv("VOICE_GATEWAY_HOST", "0.0.0.0")
@@ -38,29 +44,36 @@ DEFAULT_STT_COMPUTE_TYPE = "float16" if STT_DEVICE == "cuda" else "int8"
 STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 
+TTS_ENGINE = os.getenv("LOCAL_TTS_ENGINE", "kokoro").strip().lower()
 TTS_MODEL_NAME = os.getenv("LOCAL_TTS_MODEL", "hexgrad/Kokoro-82M")
 TTS_VOICE = os.getenv("LOCAL_TTS_VOICE", "af_heart")
 TTS_LANG_CODE = os.getenv("LOCAL_TTS_LANG_CODE", "a")
 TTS_SPEED = float(os.getenv("LOCAL_TTS_SPEED", "1"))
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 TTS_SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
-TTS_ENABLED = os.getenv("VOICE_GATEWAY_TTS_ENABLED", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-GREETING_ENABLED = os.getenv("VOICE_GATEWAY_GREETING_ENABLED", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+TTS_ENABLED = env_bool("VOICE_GATEWAY_TTS_ENABLED", True)
+GREETING_ENABLED = env_bool("VOICE_GATEWAY_GREETING_ENABLED", True)
 GREETING_TEXT = os.getenv(
     "VOICE_GATEWAY_GREETING_TEXT",
     "Hi, this is Northside Auto Service's AI receptionist. I can help with bookings, hours, location, and service questions. How can I help you today?",
 )
 CALL_END_MARKER = "[[END_CALL]]"
+
+CHATTERBOX_MODEL_NAME = os.getenv(
+    "LOCAL_CHATTERBOX_MODEL", "ResembleAI/chatterbox-turbo"
+)
+CHATTERBOX_AUDIO_PROMPT_PATH = os.getenv(
+    "LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH", ""
+).strip()
+CHATTERBOX_EMOTION_TAGS = env_bool("LOCAL_CHATTERBOX_EMOTION_TAGS", True)
+CHATTERBOX_TEMPERATURE = float(os.getenv("LOCAL_CHATTERBOX_TEMPERATURE", "0.8"))
+CHATTERBOX_TOP_P = float(os.getenv("LOCAL_CHATTERBOX_TOP_P", "0.95"))
+CHATTERBOX_TOP_K = int(os.getenv("LOCAL_CHATTERBOX_TOP_K", "1000"))
+CHATTERBOX_REPETITION_PENALTY = float(
+    os.getenv("LOCAL_CHATTERBOX_REPETITION_PENALTY", "1.2")
+)
+CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.0"))
+CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
 
 INPUT_SAMPLE_RATE = 16000
 MIN_SPEECH_THRESHOLD = float(os.getenv("VOICE_VAD_MIN_SPEECH_THRESHOLD", "0.025"))
@@ -91,7 +104,8 @@ logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[WhisperModel] = None
-tts_pipelines: Dict[str, KPipeline] = {}
+tts_pipelines: Dict[str, Any] = {}
+chatterbox_model: Optional[Any] = None
 
 
 def comma_list(value: str) -> List[str]:
@@ -228,20 +242,78 @@ def resolve_tts_device() -> str:
     return TTS_DEVICE
 
 
-def get_tts_pipeline(lang_code: str) -> KPipeline:
+def get_tts_pipeline(lang_code: str) -> Any:
     pipeline = tts_pipelines.get(lang_code)
     if pipeline is None:
+        try:
+            from kokoro import KPipeline
+        except ImportError as exc:
+            raise RuntimeError(
+                "Kokoro is not installed. Install requirements-voice-webrtc.txt "
+                "or set LOCAL_TTS_ENGINE=chatterbox_turbo."
+            ) from exc
+
         started_at = time.perf_counter()
         pipeline = KPipeline(lang_code=lang_code, device=resolve_tts_device())
         tts_pipelines[lang_code] = pipeline
         logger.info(
-            "voice.tts.loaded model=%s lang=%s device=%s latencyMs=%d",
+            "voice.tts.loaded engine=kokoro model=%s lang=%s device=%s latencyMs=%d",
             TTS_MODEL_NAME,
             lang_code,
             resolve_tts_device(),
             elapsed_ms(started_at),
         )
     return pipeline
+
+
+def get_chatterbox_model() -> Any:
+    global chatterbox_model
+
+    if chatterbox_model is not None:
+        return chatterbox_model
+
+    try:
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
+    except ImportError as exc:
+        raise RuntimeError(
+            "Chatterbox Turbo is not installed. Install "
+            "services/local-ai/requirements-voice-chatterbox.txt in the voice "
+            "gateway environment, or set LOCAL_TTS_ENGINE=kokoro."
+        ) from exc
+
+    started_at = time.perf_counter()
+    model = ChatterboxTurboTTS.from_pretrained(device=resolve_tts_device())
+    audio_prompt = CHATTERBOX_AUDIO_PROMPT_PATH
+
+    if audio_prompt:
+        prompt_path = Path(audio_prompt).expanduser()
+        if not prompt_path.exists():
+            raise RuntimeError(
+                f"LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH does not exist: {prompt_path}"
+            )
+
+        model.prepare_conditionals(
+            str(prompt_path),
+            exaggeration=CHATTERBOX_EXAGGERATION,
+            norm_loudness=CHATTERBOX_NORM_LOUDNESS,
+        )
+        audio_prompt = str(prompt_path)
+    elif getattr(model, "conds", None) is None:
+        logger.warning(
+            "voice.tts.chatterbox.no_conditionals "
+            "set LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH to a 5-10s WAV reference clip"
+        )
+
+    chatterbox_model = model
+    logger.info(
+        "voice.tts.loaded engine=chatterbox_turbo model=%s device=%s sampleRate=%s audioPrompt=%s latencyMs=%d",
+        CHATTERBOX_MODEL_NAME,
+        resolve_tts_device(),
+        getattr(model, "sr", TTS_SAMPLE_RATE),
+        bool(audio_prompt),
+        elapsed_ms(started_at),
+    )
+    return chatterbox_model
 
 
 def normalize_text_for_speech(text: str) -> str:
@@ -251,7 +323,7 @@ def normalize_text_for_speech(text: str) -> str:
         meridiem = (match.group(3) or "").lower().replace(".", "")
         return format_time_for_speech(hour, minute, meridiem or None)
 
-    text = strip_tts_asides(text)
+    text = strip_paralinguistic_tags(strip_tts_asides(text))
     text = re.sub(
         r"\b([01]?\d|2[0-3]):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?\b",
         replace_time,
@@ -295,7 +367,17 @@ def normalize_text_for_speech(text: str) -> str:
         .replace(" TAS", " Tasmania")
         .replace(" NT", " Northern Territory")
     )
+    text = re.sub(r"\s+([.,!?;:])", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def strip_paralinguistic_tags(text: str) -> str:
+    return re.sub(
+        r"\s*\[(?:laugh|laughter|chuckle|cough|sigh|gasp|breath|sniff|clear throat|clears throat)\]\s*",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def strip_tts_asides(text: str) -> str:
@@ -308,6 +390,35 @@ def strip_tts_asides(text: str) -> str:
         return " "
 
     text = re.sub(r"\(([^()]*)\)", replace_parenthetical, text)
+    return text
+
+
+def prepare_text_for_tts_engine(text: str) -> str:
+    text = normalize_text_for_speech(text)
+    if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}:
+        return decorate_text_for_chatterbox(text)
+    return text
+
+
+def decorate_text_for_chatterbox(text: str) -> str:
+    if not CHATTERBOX_EMOTION_TAGS or not text:
+        return text
+
+    if re.search(r"\[(?:laugh|chuckle|cough|sigh|gasp)\]", text, re.IGNORECASE):
+        return text
+
+    # Keep emotion cues conservative for a service receptionist. The visible chat
+    # remains plain text; this hidden TTS-only layer gives Chatterbox a subtle cue
+    # when the caller corrects themselves or the assistant acknowledges a repair.
+    if re.match(r"^(oh|ah),?\s+i see\b", text, flags=re.IGNORECASE):
+        return re.sub(
+            r"^((?:oh|ah),?\s+i see(?: what you meant)?)\b",
+            lambda match: f"{match.group(1)} [chuckle]",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
     return text
 
 
@@ -388,6 +499,31 @@ def write_wav_temp(samples: np.ndarray, sample_rate: int) -> Path:
     return temp_path
 
 
+def audio_to_float32(audio: Any) -> np.ndarray:
+    if hasattr(audio, "detach"):
+        audio = audio.detach().cpu().numpy()
+
+    audio_array = np.asarray(audio, dtype=np.float32).squeeze()
+
+    if audio_array.ndim == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    if audio_array.ndim > 1:
+        audio_array = audio_array.reshape(-1)
+
+    return np.ascontiguousarray(audio_array, dtype=np.float32)
+
+
+def resample_float32(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate == target_rate or audio.size == 0:
+        return audio
+
+    target_size = max(1, int(round(audio.size * target_rate / source_rate)))
+    source_positions = np.linspace(0, audio.size - 1, num=audio.size)
+    target_positions = np.linspace(0, audio.size - 1, num=target_size)
+    return np.interp(target_positions, source_positions, audio).astype(np.float32)
+
+
 def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
     started_at = time.perf_counter()
     temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
@@ -408,17 +544,43 @@ def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
 
 
 def iter_tts_audio(text: str):
-    pipeline = get_tts_pipeline(TTS_LANG_CODE)
-    with torch.inference_mode():
-        generator = pipeline(
-            normalize_text_for_speech(text),
-            voice=TTS_VOICE,
-            speed=TTS_SPEED,
+    speech_text = prepare_text_for_tts_engine(text)
+    if not speech_text:
+        return
+
+    if TTS_ENGINE in {"kokoro", "local_kokoro"}:
+        pipeline = get_tts_pipeline(TTS_LANG_CODE)
+        with torch.inference_mode():
+            generator = pipeline(
+                speech_text,
+                voice=TTS_VOICE,
+                speed=TTS_SPEED,
+            )
+            for _, _, audio in generator:
+                yield audio_to_float32(audio)
+        return
+
+    if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}:
+        model = get_chatterbox_model()
+        with torch.inference_mode():
+            audio = model.generate(
+                speech_text,
+                repetition_penalty=CHATTERBOX_REPETITION_PENALTY,
+                top_p=CHATTERBOX_TOP_P,
+                top_k=CHATTERBOX_TOP_K,
+                temperature=CHATTERBOX_TEMPERATURE,
+            )
+        audio_array = audio_to_float32(audio)
+        yield resample_float32(
+            audio_array,
+            int(getattr(model, "sr", TTS_SAMPLE_RATE)),
+            TTS_SAMPLE_RATE,
         )
-        for _, _, audio in generator:
-            if hasattr(audio, "detach"):
-                audio = audio.detach().cpu().numpy()
-            yield np.asarray(audio, dtype=np.float32)
+        return
+
+    raise RuntimeError(
+        "LOCAL_TTS_ENGINE must be one of: kokoro, local_kokoro, chatterbox_turbo"
+    )
 
 
 class PcmOutputTrack(MediaStreamTrack):
@@ -1368,15 +1530,22 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
 
 async def main() -> None:
     ice_servers = browser_ice_servers()
+    active_tts_model = (
+        CHATTERBOX_MODEL_NAME
+        if TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}
+        else TTS_MODEL_NAME
+    )
     logger.info(
-        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s tts=%s/%s iceServers=%d iceTransportPolicy=%s",
+        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
         HOST,
         PORT,
         NEST_WS_URL,
         STT_MODEL_NAME,
         STT_DEVICE,
-        TTS_MODEL_NAME,
+        TTS_ENGINE,
+        active_tts_model,
         resolve_tts_device(),
+        TTS_SAMPLE_RATE,
         len(ice_servers),
         browser_ice_transport_policy(),
     )

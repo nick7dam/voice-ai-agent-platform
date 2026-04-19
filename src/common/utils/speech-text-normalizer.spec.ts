@@ -42,6 +42,12 @@ describe('normalizeTextForSpeech', () => {
     ).toBe('Thanks, your booking is sorted.');
   });
 
+  it('removes hidden paralinguistic tags from ordinary speech text', () => {
+    expect(normalizeTextForSpeech('Oh, I see [chuckle]. Let me check.')).toBe(
+      'Oh, I see. Let me check.',
+    );
+  });
+
   it('keeps numeric phone area codes inside parentheses', () => {
     expect(normalizeTextForSpeech('Call us on (03) 9123 4567.')).toBe(
       'Call us on 03 9123 4567.',

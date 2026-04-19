@@ -96,6 +96,18 @@ Check that the CUDA library path can be printed:
 .venv-voice/bin/python scripts/print-cuda-library-path.py
 ```
 
+Kokoro is the default TTS engine. To test Chatterbox Turbo, create a separate
+voice environment because Chatterbox pins newer `torch` and `transformers`
+packages:
+
+```bash
+python3 -m venv .venv-voice-chatterbox
+. .venv-voice-chatterbox/bin/activate
+python -m pip install --upgrade pip setuptools wheel
+pip install -r services/local-ai/requirements-voice-chatterbox.txt
+deactivate
+```
+
 ## 5. Start Ollama On The GPU
 
 Recommended low-latency model:
@@ -248,11 +260,17 @@ LOCAL_STT_DEVICE=cuda
 LOCAL_STT_COMPUTE_TYPE=float16
 LOCAL_STT_LANGUAGE=en
 
+LOCAL_TTS_ENGINE=kokoro
 LOCAL_TTS_MODEL=hexgrad/Kokoro-82M
 LOCAL_TTS_VOICE=af_heart
 LOCAL_TTS_SPEED=1
 LOCAL_TTS_DEVICE=cuda
 LOCAL_TTS_SAMPLE_RATE=24000
+
+# Optional Chatterbox Turbo voice testing:
+# LOCAL_TTS_ENGINE=chatterbox_turbo
+# LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH=/home/ubuntu/reference-voice.wav
+# LOCAL_CHATTERBOX_EMOTION_TAGS=true
 
 VOICE_VAD_MIN_SPEECH_THRESHOLD=0.025
 VOICE_VAD_SILENCE_MS=420
@@ -314,6 +332,13 @@ set -a
 source .env
 set +a
 pnpm local:voice:cuda
+```
+
+For Chatterbox Turbo instead of Kokoro, set `LOCAL_TTS_ENGINE=chatterbox_turbo`
+and run the Chatterbox script:
+
+```bash
+LOCAL_TTS_ENGINE=chatterbox_turbo pnpm local:voice:chatterbox:cuda
 ```
 
 Expected:

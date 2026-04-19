@@ -188,6 +188,11 @@ function defaultWebSocketUrl() {
 
 function defaultWebRtcUrl() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+  if (window.location.protocol === 'https:') {
+    return `${protocol}//${window.location.host}/voice`;
+  }
+
   const host = window.location.hostname || 'localhost';
   return `${protocol}//${host}:8004`;
 }
