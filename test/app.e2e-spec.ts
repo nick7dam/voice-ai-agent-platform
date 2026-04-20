@@ -9,8 +9,10 @@ import { AppModule } from './../src/app.module';
 
 interface HealthResponse {
   status: string;
-  ollama: unknown;
-  groq: unknown;
+  transport: unknown;
+  stt: unknown;
+  reasoning: unknown;
+  tts: unknown;
 }
 
 interface TaskPayload {
@@ -58,8 +60,10 @@ describe('Health (e2e)', () => {
       .expect((response) => {
         const body = response.body as HealthResponse;
         expect(body.status).toBe('ok');
-        expect(body.ollama).toBeDefined();
-        expect(body.groq).toBeDefined();
+        expect(body.transport).toBeDefined();
+        expect(body.stt).toBeDefined();
+        expect(body.reasoning).toBeDefined();
+        expect(body.tts).toBeDefined();
       });
   });
 

@@ -261,28 +261,16 @@
       <section>
         <h1>Voice Agent Local Demo</h1>
         <p>
-          Connect, start a session, and start live mic. Speech is grouped into
-          turns automatically, transcribed by the configured STT provider, and
-          answered as text.
+          Start WebRTC voice to connect the browser microphone to the local
+          voice gateway. The gateway handles STT, Ollama reasoning, and
+          Chatterbox speech.
         </p>
-
-        <label for="wsUrl">WebSocket URL</label>
-        <input id="wsUrl" value="ws://localhost:3000/realtime" />
 
         <label for="webrtcUrl">WebRTC gateway URL</label>
         <input id="webrtcUrl" value="ws://localhost:8004" />
 
         <label for="taskKey">Task key</label>
         <input id="taskKey" value="general_voice_assistant" />
-
-        <div class="controls">
-          <button id="connect">Connect</button>
-          <button id="startSession" class="secondary" disabled>
-            Start session
-          </button>
-          <button id="startLive" disabled>Start live mic</button>
-          <button id="stopLive" class="danger" disabled>Stop live mic</button>
-        </div>
 
         <div class="controls">
           <button id="startWebrtc" class="secondary">Start WebRTC voice</button>
@@ -294,14 +282,6 @@
 
         <div class="meter" aria-label="Microphone level">
           <div id="micLevel"></div>
-        </div>
-
-        <label for="debugText">Text debug input</label>
-        <textarea id="debugText">What time is it in Melbourne?</textarea>
-        <div class="controls">
-          <button id="sendText" class="secondary" disabled>Send text</button>
-          <button id="toggleAudio" class="secondary" disabled>Audio on</button>
-          <button id="endSession" class="danger" disabled>End session</button>
         </div>
 
         <div id="status" class="status">Disconnected</div>

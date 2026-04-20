@@ -1,3 +1,0 @@
-nvidia-cublas-cu12>=12.6
-nvidia-cudnn-cu12>=9
-nvidia-cuda-runtime-cu12>=12.6

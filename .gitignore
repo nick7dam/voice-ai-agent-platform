@@ -5,6 +5,8 @@
 *.tsbuildinfo
 .venv
 .venv-*
+__pycache__/
+*.pyc
 
 # Logs
 logs

@@ -45,11 +45,7 @@ STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 STT_PRELOAD = env_bool("LOCAL_STT_PRELOAD", False)
 
-TTS_ENGINE = os.getenv("LOCAL_TTS_ENGINE", "kokoro").strip().lower()
-TTS_MODEL_NAME = os.getenv("LOCAL_TTS_MODEL", "hexgrad/Kokoro-82M")
-TTS_VOICE = os.getenv("LOCAL_TTS_VOICE", "af_heart")
-TTS_LANG_CODE = os.getenv("LOCAL_TTS_LANG_CODE", "a")
-TTS_SPEED = float(os.getenv("LOCAL_TTS_SPEED", "1"))
+TTS_ENGINE = "chatterbox_turbo"
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 TTS_SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
 TTS_PRELOAD = env_bool("LOCAL_TTS_PRELOAD", False)
@@ -58,7 +54,7 @@ TTS_ENABLED = env_bool("VOICE_GATEWAY_TTS_ENABLED", True)
 GREETING_ENABLED = env_bool("VOICE_GATEWAY_GREETING_ENABLED", True)
 GREETING_TEXT = os.getenv(
     "VOICE_GATEWAY_GREETING_TEXT",
-    "Hi, this is Northside Auto Service's AI receptionist. I can help with bookings, hours, location, and service questions. How can I help you today?",
+    "Hi, this is your AI voice assistant. How can I help you today?",
 )
 CALL_END_MARKER = "[[END_CALL]]"
 CALL_END_AUDIO_TAIL_MS = int(os.getenv("VOICE_CALL_END_AUDIO_TAIL_MS", "650"))
@@ -145,12 +141,7 @@ logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[WhisperModel] = None
-tts_pipelines: Dict[str, Any] = {}
 chatterbox_model: Optional[Any] = None
-
-
-def is_chatterbox_engine() -> bool:
-    return TTS_ENGINE in {"chatterbox", "chatterbox_turbo"}
 
 
 def comma_list(value: str) -> List[str]:
@@ -306,30 +297,6 @@ def resolve_tts_device() -> str:
     return TTS_DEVICE
 
 
-def get_tts_pipeline(lang_code: str) -> Any:
-    pipeline = tts_pipelines.get(lang_code)
-    if pipeline is None:
-        try:
-            from kokoro import KPipeline
-        except ImportError as exc:
-            raise RuntimeError(
-                "Kokoro is not installed. Install requirements-voice-webrtc.txt "
-                "or set LOCAL_TTS_ENGINE=chatterbox_turbo."
-            ) from exc
-
-        started_at = time.perf_counter()
-        pipeline = KPipeline(lang_code=lang_code, device=resolve_tts_device())
-        tts_pipelines[lang_code] = pipeline
-        logger.info(
-            "voice.tts.loaded engine=kokoro model=%s lang=%s device=%s latencyMs=%d",
-            TTS_MODEL_NAME,
-            lang_code,
-            resolve_tts_device(),
-            elapsed_ms(started_at),
-        )
-    return pipeline
-
-
 def ensure_perth_watermarker() -> None:
     try:
         import perth
@@ -396,7 +363,7 @@ def get_chatterbox_model() -> Any:
         raise RuntimeError(
             "Chatterbox Turbo is not installed. Install "
             "services/local-ai/requirements-voice-chatterbox.txt in the voice "
-            "gateway environment, or set LOCAL_TTS_ENGINE=kokoro."
+            "gateway environment."
         ) from exc
 
     started_at = time.perf_counter()
@@ -520,9 +487,7 @@ def strip_tts_asides(text: str) -> str:
 
 def prepare_text_for_tts_engine(text: str) -> str:
     text = normalize_text_for_speech(text)
-    if is_chatterbox_engine():
-        return decorate_text_for_chatterbox(text)
-    return text
+    return decorate_text_for_chatterbox(text)
 
 
 def decorate_text_for_chatterbox(text: str) -> str:
@@ -551,9 +516,6 @@ def split_text_for_tts_queue(text: str, first_phrase: bool) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
-
-    if not is_chatterbox_engine():
-        return [text]
 
     return split_chatterbox_phrases(text, first_phrase)
 
@@ -790,56 +752,38 @@ def iter_tts_audio(text: str):
     if not speech_text:
         return
 
-    if TTS_ENGINE in {"kokoro", "local_kokoro"}:
-        pipeline = get_tts_pipeline(TTS_LANG_CODE)
-        with torch.inference_mode():
-            generator = pipeline(
-                speech_text,
-                voice=TTS_VOICE,
-                speed=TTS_SPEED,
-            )
-            for _, _, audio in generator:
-                yield audio_to_float32(audio)
-        return
-
-    if is_chatterbox_engine():
-        model = get_chatterbox_model()
-        started_at = time.perf_counter()
-        logger.info(
-            "voice.tts.chatterbox.generate.start chars=%d temperature=%.2f topP=%.2f topK=%d",
-            len(speech_text),
-            CHATTERBOX_TEMPERATURE,
-            CHATTERBOX_TOP_P,
-            CHATTERBOX_TOP_K,
-        )
-        with torch.inference_mode():
-            audio = model.generate(
-                speech_text,
-                repetition_penalty=CHATTERBOX_REPETITION_PENALTY,
-                top_p=CHATTERBOX_TOP_P,
-                top_k=CHATTERBOX_TOP_K,
-                temperature=CHATTERBOX_TEMPERATURE,
-            )
-        audio_array = audio_to_float32(audio)
-        audio_array = resample_float32(
-            audio_array,
-            int(getattr(model, "sr", TTS_SAMPLE_RATE)),
-            TTS_SAMPLE_RATE,
-        )
-        audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
-        logger.info(
-            "voice.tts.chatterbox.generate.end chars=%d samples=%d audioSeconds=%.2f latencyMs=%d",
-            len(speech_text),
-            int(audio_array.size),
-            audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
-            elapsed_ms(started_at),
-        )
-        yield audio_array
-        return
-
-    raise RuntimeError(
-        "LOCAL_TTS_ENGINE must be one of: kokoro, local_kokoro, chatterbox_turbo"
+    model = get_chatterbox_model()
+    started_at = time.perf_counter()
+    logger.info(
+        "voice.tts.chatterbox.generate.start chars=%d temperature=%.2f topP=%.2f topK=%d",
+        len(speech_text),
+        CHATTERBOX_TEMPERATURE,
+        CHATTERBOX_TOP_P,
+        CHATTERBOX_TOP_K,
     )
+    with torch.inference_mode():
+        audio = model.generate(
+            speech_text,
+            repetition_penalty=CHATTERBOX_REPETITION_PENALTY,
+            top_p=CHATTERBOX_TOP_P,
+            top_k=CHATTERBOX_TOP_K,
+            temperature=CHATTERBOX_TEMPERATURE,
+        )
+    audio_array = audio_to_float32(audio)
+    audio_array = resample_float32(
+        audio_array,
+        int(getattr(model, "sr", TTS_SAMPLE_RATE)),
+        TTS_SAMPLE_RATE,
+    )
+    audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
+    logger.info(
+        "voice.tts.chatterbox.generate.end chars=%d samples=%d audioSeconds=%.2f latencyMs=%d",
+        len(speech_text),
+        int(audio_array.size),
+        audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
+        elapsed_ms(started_at),
+    )
+    yield audio_array
 
 
 class PcmOutputTrack(MediaStreamTrack):
@@ -1230,7 +1174,6 @@ class NestControlClient:
             }
         )
         await asyncio.wait_for(self.ready.wait(), timeout=10)
-        await self.send({"type": "session.audio_output", "payload": {"enabled": False}})
         logger.info("voice.nest.ready")
 
     async def send_text(self, text: str) -> None:
@@ -1943,7 +1886,7 @@ class VoiceSession:
             return
 
         first_phrase = self.spoken_chars_by_turn.get(turn_id, 0) == 0
-        queue_text = normalize_text_for_speech(text) if is_chatterbox_engine() else text
+        queue_text = normalize_text_for_speech(text)
         phrases = split_text_for_tts_queue(queue_text, first_phrase)
         queued = 0
         queued_chars = 0
@@ -2268,9 +2211,6 @@ async def preload_models() -> None:
 
 async def main() -> None:
     ice_servers = browser_ice_servers()
-    active_tts_model = (
-        CHATTERBOX_MODEL_NAME if is_chatterbox_engine() else TTS_MODEL_NAME
-    )
     logger.info(
         "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
         HOST,
@@ -2279,20 +2219,19 @@ async def main() -> None:
         STT_MODEL_NAME,
         STT_DEVICE,
         TTS_ENGINE,
-        active_tts_model,
+        CHATTERBOX_MODEL_NAME,
         resolve_tts_device(),
         TTS_SAMPLE_RATE,
         len(ice_servers),
         browser_ice_transport_policy(),
     )
-    if is_chatterbox_engine():
-        logger.info(
-            "voice.tts.chatterbox.phrasing firstMax=%d target=%d max=%d turnMax=%d",
-            TTS_FIRST_PHRASE_MAX_CHARS,
-            TTS_PHRASE_TARGET_CHARS,
-            TTS_PHRASE_MAX_CHARS,
-            TTS_MAX_SPOKEN_CHARS_PER_TURN,
-        )
+    logger.info(
+        "voice.tts.chatterbox.phrasing firstMax=%d target=%d max=%d turnMax=%d",
+        TTS_FIRST_PHRASE_MAX_CHARS,
+        TTS_PHRASE_TARGET_CHARS,
+        TTS_PHRASE_MAX_CHARS,
+        TTS_MAX_SPOKEN_CHARS_PER_TURN,
+    )
 
     should_preload = STT_PRELOAD or TTS_PRELOAD
     if should_preload and GATEWAY_BLOCKING_PRELOAD:
