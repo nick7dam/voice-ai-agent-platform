@@ -7,7 +7,7 @@ Browser
 -> faster-whisper `Systran/faster-distil-whisper-large-v3`
 -> NestJS
 -> Ollama
--> Qwen3-TTS `Qwen/Qwen3-TTS-12Hz-0.6B-Base`
+-> Qwen3-TTS `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
 -> WebRTC audio
 
 ## 1. Base Packages

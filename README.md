@@ -7,7 +7,7 @@ Browser microphone
 -> local faster-whisper STT
 -> NestJS orchestration
 -> Ollama Qwen reasoning
--> local Qwen3-TTS voice clone
+-> local Qwen3-TTS streaming CustomVoice
 -> WebRTC audio back to the browser
 
 The project intentionally does not include Groq providers, Laravel booking tools, Kokoro, direct browser audio-over-WebSocket, telephony, or backend business integrations in this cleaned build.
@@ -22,7 +22,7 @@ The project intentionally does not include Groq providers, Laravel booking tools
 
 - STT: `Systran/faster-distil-whisper-large-v3` through `faster-whisper`.
 - Reasoning: Ollama `/api/chat`, defaulting to `qwen3:8b`.
-- TTS: `Qwen/Qwen3-TTS-12Hz-0.6B-Base` voice cloning with `public/reference_audio.wav`.
+- TTS: `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` with streaming PCM chunks.
 - Transport: browser WebRTC plus a small Nest websocket used only between the Python gateway and Nest.
 
 ## Setup
@@ -162,7 +162,7 @@ session.ended
 error
 ```
 
-The Python gateway converts `assistant.text.chunk` events into Qwen3-TTS audio and sends audio back over the WebRTC media track. The current local Qwen wrapper generates per queued phrase, so WebRTC playback is streamed after each phrase is synthesized rather than using Qwen's lower-level audio-token streaming internals.
+The Python gateway converts `assistant.text.chunk` events into Qwen3-TTS streaming audio chunks and sends each chunk back over the WebRTC media track as soon as it is generated.
 
 ## Useful Checks
 

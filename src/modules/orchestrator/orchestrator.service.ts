@@ -152,9 +152,9 @@ export class OrchestratorService {
 
       ensureTurnCurrent();
 
-      const shouldEndCall =
+      /*const shouldEndCall =
         this.shouldEndCall(result.text) ||
-        this.isCallEndingUserText(trimmedTranscript);
+        this.isCallEndingUserText(trimmedTranscript);*/
       const safeText = this.normalizeAssistantText(result.text, task);
       const finalSpeechChunks = this.extractSpeechChunks(
         safeText,

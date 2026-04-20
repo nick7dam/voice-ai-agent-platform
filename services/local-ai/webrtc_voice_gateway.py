@@ -79,17 +79,14 @@ CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
 CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
 
 QWEN_TTS_MODEL_NAME = os.getenv(
-    "LOCAL_QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    "LOCAL_QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 )
 QWEN_TTS_LANGUAGE = os.getenv("LOCAL_QWEN_TTS_LANGUAGE", "English").strip() or "Auto"
-QWEN_TTS_REF_AUDIO_PATH = os.getenv(
-    "LOCAL_QWEN_TTS_REF_AUDIO_PATH", "public/reference_audio.wav"
-).strip()
-QWEN_TTS_REF_TEXT = os.getenv("LOCAL_QWEN_TTS_REF_TEXT", "").strip()
-QWEN_TTS_X_VECTOR_ONLY = env_bool("LOCAL_QWEN_TTS_X_VECTOR_ONLY", False)
+QWEN_TTS_SPEAKER = os.getenv("LOCAL_QWEN_TTS_SPEAKER", "aiden").strip()
+QWEN_TTS_INSTRUCT = os.getenv("LOCAL_QWEN_TTS_INSTRUCT", "").strip() or None
 QWEN_TTS_DTYPE = os.getenv("LOCAL_QWEN_TTS_DTYPE", "bfloat16").strip().lower()
 QWEN_TTS_ATTN_IMPLEMENTATION = os.getenv(
-    "LOCAL_QWEN_TTS_ATTN_IMPLEMENTATION", ""
+    "LOCAL_QWEN_TTS_ATTN_IMPLEMENTATION", "sdpa"
 ).strip()
 QWEN_TTS_NON_STREAMING_MODE = env_bool("LOCAL_QWEN_TTS_NON_STREAMING_MODE", False)
 QWEN_TTS_TEMPERATURE = float(os.getenv("LOCAL_QWEN_TTS_TEMPERATURE", "0.85"))
@@ -99,7 +96,12 @@ QWEN_TTS_REPETITION_PENALTY = float(
     os.getenv("LOCAL_QWEN_TTS_REPETITION_PENALTY", "1.05")
 )
 QWEN_TTS_MAX_NEW_TOKENS = int(os.getenv("LOCAL_QWEN_TTS_MAX_NEW_TOKENS", "2048"))
+QWEN_TTS_MIN_NEW_TOKENS = int(os.getenv("LOCAL_QWEN_TTS_MIN_NEW_TOKENS", "2"))
 QWEN_TTS_DO_SAMPLE = env_bool("LOCAL_QWEN_TTS_DO_SAMPLE", True)
+QWEN_TTS_STREAM_CHUNK_SIZE = max(
+    1, int(os.getenv("LOCAL_QWEN_TTS_STREAM_CHUNK_SIZE", "4"))
+)
+QWEN_TTS_MAX_SEQ_LEN = int(os.getenv("LOCAL_QWEN_TTS_MAX_SEQ_LEN", "2048"))
 
 TTS_MIN_PHRASE_CHARS = max(1, int(os.getenv("VOICE_TTS_MIN_PHRASE_CHARS", "8")))
 TTS_PHRASE_TARGET_CHARS = max(
@@ -167,7 +169,6 @@ logger = logging.getLogger("webrtc_voice_gateway")
 whisper_model: Optional[WhisperModel] = None
 chatterbox_model: Optional[Any] = None
 qwen_tts_model: Optional[Any] = None
-qwen_voice_clone_prompt: Optional[Any] = None
 
 
 def comma_list(value: str) -> List[str]:
@@ -454,28 +455,27 @@ def resolve_qwen_tts_dtype() -> torch.dtype:
     )
 
 
-def resolve_qwen_tts_device_map() -> str:
+def resolve_qwen_tts_device() -> str:
     device = resolve_tts_device()
     if device == "cuda":
-        return "cuda:0"
-    return device
+        return "cuda"
+    raise RuntimeError(
+        "The streaming Qwen3-TTS engine requires CUDA. "
+        "Set LOCAL_TTS_DEVICE=cuda or use LOCAL_TTS_ENGINE=chatterbox_turbo."
+    )
 
 
-def get_qwen_ref_audio_path() -> str:
-    if not QWEN_TTS_REF_AUDIO_PATH:
+def ensure_qwen_custom_voice_config() -> None:
+    if "customvoice" not in QWEN_TTS_MODEL_NAME.lower():
         raise RuntimeError(
-            "LOCAL_QWEN_TTS_REF_AUDIO_PATH is required for Qwen3-TTS voice cloning."
+            "The low-latency streaming path uses a Qwen3-TTS CustomVoice model. "
+            "Set LOCAL_QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice."
         )
 
-    ref_path = Path(QWEN_TTS_REF_AUDIO_PATH).expanduser()
-    if not ref_path.is_absolute():
-        ref_path = Path.cwd() / ref_path
-    if not ref_path.exists():
+    if not QWEN_TTS_SPEAKER:
         raise RuntimeError(
-            f"LOCAL_QWEN_TTS_REF_AUDIO_PATH does not exist: {ref_path}"
+            "LOCAL_QWEN_TTS_SPEAKER is required for Qwen3-TTS CustomVoice."
         )
-
-    return str(ref_path)
 
 
 def get_qwen_tts_model() -> Any:
@@ -485,32 +485,34 @@ def get_qwen_tts_model() -> Any:
         return qwen_tts_model
 
     try:
-        from qwen_tts import Qwen3TTSModel
+        from faster_qwen3_tts import FasterQwen3TTS
     except ImportError as exc:
         raise RuntimeError(
-            "Qwen3-TTS is not installed. Install "
+            "faster-qwen3-tts is not installed. Install "
             "services/local-ai/requirements-voice.txt in the voice "
             "gateway environment, then restart the gateway."
         ) from exc
 
+    ensure_qwen_custom_voice_config()
     started_at = time.perf_counter()
     load_kwargs: Dict[str, Any] = {
-        "device_map": resolve_qwen_tts_device_map(),
+        "device": resolve_qwen_tts_device(),
         "dtype": resolve_qwen_tts_dtype(),
+        "max_seq_len": QWEN_TTS_MAX_SEQ_LEN,
     }
     if QWEN_TTS_ATTN_IMPLEMENTATION:
         load_kwargs["attn_implementation"] = QWEN_TTS_ATTN_IMPLEMENTATION
 
     logger.info(
-        "voice.tts.qwen.load.start model=%s deviceMap=%s dtype=%s attn=%s refAudio=%s refText=%s",
+        "voice.tts.qwen.load.start model=%s device=%s dtype=%s attn=%s speaker=%s chunkSize=%d",
         QWEN_TTS_MODEL_NAME,
-        load_kwargs["device_map"],
+        load_kwargs["device"],
         QWEN_TTS_DTYPE,
         QWEN_TTS_ATTN_IMPLEMENTATION or "default",
-        bool(QWEN_TTS_REF_AUDIO_PATH),
-        bool(QWEN_TTS_REF_TEXT),
+        QWEN_TTS_SPEAKER,
+        QWEN_TTS_STREAM_CHUNK_SIZE,
     )
-    qwen_tts_model = Qwen3TTSModel.from_pretrained(
+    qwen_tts_model = FasterQwen3TTS.from_pretrained(
         QWEN_TTS_MODEL_NAME,
         **load_kwargs,
     )
@@ -522,38 +524,6 @@ def get_qwen_tts_model() -> Any:
         elapsed_ms(started_at),
     )
     return qwen_tts_model
-
-
-def get_qwen_voice_clone_prompt() -> Any:
-    global qwen_voice_clone_prompt
-
-    if qwen_voice_clone_prompt is not None:
-        return qwen_voice_clone_prompt
-
-    model = get_qwen_tts_model()
-    ref_audio = get_qwen_ref_audio_path()
-    use_x_vector_only = QWEN_TTS_X_VECTOR_ONLY or not QWEN_TTS_REF_TEXT
-
-    if use_x_vector_only and not QWEN_TTS_REF_TEXT:
-        logger.warning(
-            "voice.tts.qwen.ref_text_missing using x_vector_only_mode=true; "
-            "set LOCAL_QWEN_TTS_REF_TEXT for stronger cloning quality"
-        )
-
-    started_at = time.perf_counter()
-    qwen_voice_clone_prompt = model.create_voice_clone_prompt(
-        ref_audio=ref_audio,
-        ref_text=None if use_x_vector_only else QWEN_TTS_REF_TEXT,
-        x_vector_only_mode=use_x_vector_only,
-    )
-    logger.info(
-        "voice.tts.qwen.clone_prompt.ready refAudio=%s refText=%s xVectorOnly=%s latencyMs=%d",
-        ref_audio,
-        bool(QWEN_TTS_REF_TEXT),
-        use_x_vector_only,
-        elapsed_ms(started_at),
-    )
-    return qwen_voice_clone_prompt
 
 
 def normalize_text_for_speech(text: str) -> str:
@@ -934,48 +904,66 @@ def iter_chatterbox_tts_audio(speech_text: str):
 
 def iter_qwen_tts_audio(speech_text: str):
     model = get_qwen_tts_model()
-    voice_clone_prompt = get_qwen_voice_clone_prompt()
     started_at = time.perf_counter()
+    chunks = 0
+    samples = 0
     logger.info(
-        "voice.tts.qwen.generate.start chars=%d model=%s language=%s nonStreamingMode=%s temperature=%.2f topP=%.2f topK=%d",
+        "voice.tts.qwen.stream.start chars=%d model=%s speaker=%s language=%s chunkSize=%d nonStreamingMode=%s temperature=%.2f topP=%.2f topK=%d",
         len(speech_text),
         QWEN_TTS_MODEL_NAME,
+        QWEN_TTS_SPEAKER,
         QWEN_TTS_LANGUAGE,
+        QWEN_TTS_STREAM_CHUNK_SIZE,
         QWEN_TTS_NON_STREAMING_MODE,
         QWEN_TTS_TEMPERATURE,
         QWEN_TTS_TOP_P,
         QWEN_TTS_TOP_K,
     )
     with torch.inference_mode():
-        wavs, sample_rate = model.generate_voice_clone(
+        stream = model.generate_custom_voice_streaming(
             text=speech_text,
             language=QWEN_TTS_LANGUAGE,
-            voice_clone_prompt=voice_clone_prompt,
+            speaker=QWEN_TTS_SPEAKER,
+            instruct=QWEN_TTS_INSTRUCT,
+            chunk_size=QWEN_TTS_STREAM_CHUNK_SIZE,
             non_streaming_mode=QWEN_TTS_NON_STREAMING_MODE,
             do_sample=QWEN_TTS_DO_SAMPLE,
             top_k=QWEN_TTS_TOP_K,
             top_p=QWEN_TTS_TOP_P,
             temperature=QWEN_TTS_TEMPERATURE,
             repetition_penalty=QWEN_TTS_REPETITION_PENALTY,
+            min_new_tokens=QWEN_TTS_MIN_NEW_TOKENS,
             max_new_tokens=QWEN_TTS_MAX_NEW_TOKENS,
         )
 
-    if not wavs:
-        logger.warning("voice.tts.qwen.generate.empty chars=%d", len(speech_text))
-        return
+        for audio_chunk, sample_rate, timing in stream:
+            audio_array = audio_to_float32(audio_chunk)
+            audio_array = resample_float32(
+                audio_array, int(sample_rate), TTS_SAMPLE_RATE
+            )
+            if audio_array.size == 0:
+                continue
+            chunks += 1
+            samples += int(audio_array.size)
+            if chunks == 1:
+                logger.info(
+                    "voice.tts.qwen.first_chunk chars=%d samples=%d audioSeconds=%.2f timing=%s latencyMs=%d",
+                    len(speech_text),
+                    int(audio_array.size),
+                    audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
+                    timing,
+                    elapsed_ms(started_at),
+                )
+            yield audio_array
 
-    audio_array = audio_to_float32(wavs[0])
-    audio_array = resample_float32(audio_array, int(sample_rate), TTS_SAMPLE_RATE)
-    audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
     logger.info(
-        "voice.tts.qwen.generate.end chars=%d samples=%d audioSeconds=%.2f sourceSampleRate=%s latencyMs=%d",
+        "voice.tts.qwen.stream.end chars=%d chunks=%d samples=%d audioSeconds=%.2f latencyMs=%d",
         len(speech_text),
-        int(audio_array.size),
-        audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
-        sample_rate,
+        chunks,
+        samples,
+        samples / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
         elapsed_ms(started_at),
     )
-    yield audio_array
 
 
 def iter_tts_audio(text: str):

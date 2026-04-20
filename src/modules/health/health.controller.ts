@@ -35,10 +35,10 @@ export class HealthController {
       tts: {
         provider: 'qwen3_tts',
         model:
-          process.env.LOCAL_QWEN_TTS_MODEL ?? 'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
-        referenceAudio:
-          process.env.LOCAL_QWEN_TTS_REF_AUDIO_PATH ??
-          'public/reference_audio.wav',
+          process.env.LOCAL_QWEN_TTS_MODEL ??
+          'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice',
+        speaker: process.env.LOCAL_QWEN_TTS_SPEAKER ?? 'aiden',
+        streamingChunkSize: process.env.LOCAL_QWEN_TTS_STREAM_CHUNK_SIZE ?? '4',
         location: 'webrtc_voice_gateway',
       },
     };
