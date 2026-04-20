@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -330,6 +331,27 @@ def active_tts_model_name() -> str:
     if TTS_ENGINE == "chatterbox_turbo":
         return CHATTERBOX_MODEL_NAME
     return "unknown"
+
+
+def call_with_supported_kwargs(fn: Any, **kwargs: Any) -> Any:
+    signature = inspect.signature(fn)
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD
+        for param in signature.parameters.values()
+    )
+    if accepts_kwargs:
+        return fn(**kwargs)
+
+    supported = set(signature.parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in supported}
+    dropped = sorted(set(kwargs) - set(filtered))
+    if dropped:
+        logger.debug(
+            "voice.compat.filtered_kwargs fn=%s dropped=%s",
+            getattr(fn, "__name__", fn.__class__.__name__),
+            ",".join(dropped),
+        )
+    return fn(**filtered)
 
 
 def ensure_perth_watermarker() -> None:
