@@ -942,7 +942,8 @@ def iter_qwen_tts_audio(speech_text: str):
         QWEN_TTS_TOP_K,
     )
     with torch.inference_mode():
-        stream = model.generate_custom_voice_streaming(
+        stream = call_with_supported_kwargs(
+            model.generate_custom_voice_streaming,
             text=speech_text,
             language=QWEN_TTS_LANGUAGE,
             speaker=QWEN_TTS_SPEAKER,
