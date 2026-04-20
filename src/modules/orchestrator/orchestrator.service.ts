@@ -175,7 +175,7 @@ export class OrchestratorService {
       });
       this.sessions.setState(sessionId, 'idle');
 
-      if (shouldEndCall) {
+      /*if (shouldEndCall) {
         emit({
           type: 'session.end_requested',
           sessionId,
@@ -185,7 +185,7 @@ export class OrchestratorService {
             reason: 'assistant_completed_call',
           },
         });
-      }
+      }*/
 
       this.logger.log(
         `reasoning.end session=${sessionId} turn=${turnId} latencyMs=${elapsedMs(startedAt)} providerLatencyMs=${result.latencyMs}`,
