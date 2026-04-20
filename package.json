@@ -1,7 +1,7 @@
 {
   "name": "voice-ai-agent-platform",
   "version": "0.0.1",
-  "description": "Low-latency browser-to-WebRTC voice-agent MVP using local Whisper, Ollama, and Chatterbox.",
+  "description": "Low-latency browser-to-WebRTC voice-agent MVP using local Whisper, Ollama Qwen, and Qwen3-TTS.",
   "author": "",
   "private": true,
   "license": "UNLICENSED",

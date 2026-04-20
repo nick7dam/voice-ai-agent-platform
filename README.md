@@ -6,8 +6,8 @@ Browser microphone
 -> WebRTC voice gateway
 -> local faster-whisper STT
 -> NestJS orchestration
--> Ollama reasoning
--> local Chatterbox TTS
+-> Ollama Qwen reasoning
+-> local Qwen3-TTS voice clone
 -> WebRTC audio back to the browser
 
 The project intentionally does not include Groq providers, Laravel booking tools, Kokoro, direct browser audio-over-WebSocket, telephony, or backend business integrations in this cleaned build.
@@ -15,14 +15,14 @@ The project intentionally does not include Groq providers, Laravel booking tools
 ## What Runs Where
 
 - `src/`: NestJS control plane, task configuration UI/API, session state, prompt building, Ollama adapter, and `/realtime` control websocket for the voice gateway.
-- `services/local-ai/webrtc_voice_gateway.py`: WebRTC media gateway. It receives browser audio, handles VAD/turn detection, runs STT, sends final transcripts to Nest, receives streamed text chunks, and synthesizes Chatterbox speech.
+- `services/local-ai/webrtc_voice_gateway.py`: WebRTC media gateway. It receives browser audio, handles VAD/turn detection, runs STT, sends final transcripts to Nest, receives streamed text chunks, and synthesizes Qwen3-TTS speech.
 - `public/`: Minimal browser UI. It starts/stops WebRTC voice, shows chat history/events/latency, and edits the task purpose.
 
 ## Kept Components
 
 - STT: `Systran/faster-distil-whisper-large-v3` through `faster-whisper`.
-- Reasoning: Ollama `/api/chat`.
-- TTS: `ResembleAI/chatterbox-turbo`.
+- Reasoning: Ollama `/api/chat`, defaulting to `qwen3:8b`.
+- TTS: `Qwen/Qwen3-TTS-12Hz-0.6B-Base` voice cloning with `public/reference_audio.wav`.
 - Transport: browser WebRTC plus a small Nest websocket used only between the Python gateway and Nest.
 
 ## Setup
@@ -46,7 +46,7 @@ Install the Python voice gateway environment:
 ```bash
 python3 -m venv .venv-voice-chatterbox
 .venv-voice-chatterbox/bin/python -m pip install --upgrade pip
-.venv-voice-chatterbox/bin/python -m pip install -r services/local-ai/requirements-voice-chatterbox.txt
+.venv-voice-chatterbox/bin/python -m pip install -r services/local-ai/requirements-voice.txt
 ```
 
 ## Ollama
@@ -55,14 +55,14 @@ Start Ollama and pull a fast model:
 
 ```bash
 ollama serve
-ollama pull llama3.2:3b
+ollama pull qwen3:8b
 ```
 
 Set these in `.env` if needed:
 
 ```bash
 OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2:3b
+OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
 ```
 
@@ -70,7 +70,7 @@ On a GPU host using Docker, a typical Ollama command is:
 
 ```bash
 docker run -d --name ollama --gpus all -p 11434:11434 -v ollama:/root/.ollama ollama/ollama
-docker exec -it ollama ollama pull llama3.2:3b
+docker exec -it ollama ollama pull qwen3:8b
 ```
 
 ## Run Locally
@@ -162,7 +162,7 @@ session.ended
 error
 ```
 
-The Python gateway converts `assistant.text.chunk` events into Chatterbox audio and sends audio back over the WebRTC media track.
+The Python gateway converts `assistant.text.chunk` events into Qwen3-TTS audio and sends audio back over the WebRTC media track. The current local Qwen wrapper generates per queued phrase, so WebRTC playback is streamed after each phrase is synthesized rather than using Qwen's lower-level audio-token streaming internals.
 
 ## Useful Checks
 

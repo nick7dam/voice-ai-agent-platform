@@ -16,7 +16,7 @@ export const envSchema = z.object({
   DEFAULT_TASK_KEY: z.string().min(1).default('general_voice_assistant'),
   TASK_CONFIG_PATH: z.string().min(1).default('data/tasks.local.json'),
   OLLAMA_BASE_URL: z.string().url().default('http://localhost:11434'),
-  OLLAMA_MODEL: z.string().min(1).default('llama3.2:3b'),
+  OLLAMA_MODEL: z.string().min(1).default('qwen3:8b'),
   OLLAMA_REQUEST_TIMEOUT_MS: z.coerce
     .number()
     .int()

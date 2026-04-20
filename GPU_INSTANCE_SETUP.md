@@ -7,7 +7,7 @@ Browser
 -> faster-whisper `Systran/faster-distil-whisper-large-v3`
 -> NestJS
 -> Ollama
--> Chatterbox `ResembleAI/chatterbox-turbo`
+-> Qwen3-TTS `Qwen/Qwen3-TTS-12Hz-0.6B-Base`
 -> WebRTC audio
 
 ## 1. Base Packages
@@ -49,7 +49,7 @@ Install the voice Python environment:
 ```bash
 python3 -m venv .venv-voice-chatterbox
 .venv-voice-chatterbox/bin/python -m pip install --upgrade pip
-.venv-voice-chatterbox/bin/python -m pip install -r services/local-ai/requirements-voice-chatterbox.txt
+.venv-voice-chatterbox/bin/python -m pip install -r services/local-ai/requirements-voice.txt
 ```
 
 ## 3. Ollama On GPU
@@ -58,7 +58,7 @@ With Docker:
 
 ```bash
 docker run -d --name ollama --gpus all -p 11434:11434 -v ollama:/root/.ollama ollama/ollama
-docker exec -it ollama ollama pull llama3.2:3b
+docker exec -it ollama ollama pull qwen3:8b
 ```
 
 If Docker requires sudo:
@@ -72,7 +72,7 @@ Set in `.env`:
 
 ```bash
 OLLAMA_BASE_URL=http://127.0.0.1:11434
-OLLAMA_MODEL=llama3.2:3b
+OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
 ```
 
@@ -183,7 +183,7 @@ python3 -m py_compile services/local-ai/webrtc_voice_gateway.py
 Expected process split on GPU:
 
 - `ollama` uses GPU when a model is loaded.
-- `.venv-voice-chatterbox/bin/python` uses GPU for STT and Chatterbox.
+- `.venv-voice-chatterbox/bin/python` uses GPU for STT and Qwen3-TTS.
 
 ## 8. Common Issues
 
@@ -201,4 +201,4 @@ export LD_LIBRARY_PATH=$(./.venv-voice-chatterbox/bin/python scripts/print-cuda-
 pnpm local:voice:cuda
 ```
 
-If Chatterbox downloads on first run, let it finish once. Later runs should use the Hugging Face cache.
+If Qwen3-TTS downloads on first run, let it finish once. Later runs should use the Hugging Face cache.

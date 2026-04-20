@@ -33,8 +33,12 @@ export class HealthController {
         error: ollamaReachability.error,
       },
       tts: {
-        provider: 'chatterbox_turbo',
-        model: 'ResembleAI/chatterbox-turbo',
+        provider: 'qwen3_tts',
+        model:
+          process.env.LOCAL_QWEN_TTS_MODEL ?? 'Qwen/Qwen3-TTS-12Hz-0.6B-Base',
+        referenceAudio:
+          process.env.LOCAL_QWEN_TTS_REF_AUDIO_PATH ??
+          'public/reference_audio.wav',
         location: 'webrtc_voice_gateway',
       },
     };

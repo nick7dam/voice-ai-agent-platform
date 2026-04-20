@@ -45,7 +45,7 @@ STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 STT_PRELOAD = env_bool("LOCAL_STT_PRELOAD", False)
 
-TTS_ENGINE = "chatterbox_turbo"
+TTS_ENGINE = os.getenv("LOCAL_TTS_ENGINE", "qwen3_tts").strip().lower()
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 TTS_SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
 TTS_PRELOAD = env_bool("LOCAL_TTS_PRELOAD", False)
@@ -77,6 +77,30 @@ CHATTERBOX_REPETITION_PENALTY = float(
 CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.5"))
 CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
 CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
+
+QWEN_TTS_MODEL_NAME = os.getenv(
+    "LOCAL_QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+)
+QWEN_TTS_LANGUAGE = os.getenv("LOCAL_QWEN_TTS_LANGUAGE", "English").strip() or "Auto"
+QWEN_TTS_REF_AUDIO_PATH = os.getenv(
+    "LOCAL_QWEN_TTS_REF_AUDIO_PATH", "public/reference_audio.wav"
+).strip()
+QWEN_TTS_REF_TEXT = os.getenv("LOCAL_QWEN_TTS_REF_TEXT", "").strip()
+QWEN_TTS_X_VECTOR_ONLY = env_bool("LOCAL_QWEN_TTS_X_VECTOR_ONLY", False)
+QWEN_TTS_DTYPE = os.getenv("LOCAL_QWEN_TTS_DTYPE", "bfloat16").strip().lower()
+QWEN_TTS_ATTN_IMPLEMENTATION = os.getenv(
+    "LOCAL_QWEN_TTS_ATTN_IMPLEMENTATION", ""
+).strip()
+QWEN_TTS_NON_STREAMING_MODE = env_bool("LOCAL_QWEN_TTS_NON_STREAMING_MODE", False)
+QWEN_TTS_TEMPERATURE = float(os.getenv("LOCAL_QWEN_TTS_TEMPERATURE", "0.85"))
+QWEN_TTS_TOP_P = float(os.getenv("LOCAL_QWEN_TTS_TOP_P", "0.95"))
+QWEN_TTS_TOP_K = int(os.getenv("LOCAL_QWEN_TTS_TOP_K", "50"))
+QWEN_TTS_REPETITION_PENALTY = float(
+    os.getenv("LOCAL_QWEN_TTS_REPETITION_PENALTY", "1.05")
+)
+QWEN_TTS_MAX_NEW_TOKENS = int(os.getenv("LOCAL_QWEN_TTS_MAX_NEW_TOKENS", "2048"))
+QWEN_TTS_DO_SAMPLE = env_bool("LOCAL_QWEN_TTS_DO_SAMPLE", True)
+
 TTS_MIN_PHRASE_CHARS = max(1, int(os.getenv("VOICE_TTS_MIN_PHRASE_CHARS", "8")))
 TTS_PHRASE_TARGET_CHARS = max(
     TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_PHRASE_TARGET_CHARS", "95"))
@@ -142,6 +166,8 @@ logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[WhisperModel] = None
 chatterbox_model: Optional[Any] = None
+qwen_tts_model: Optional[Any] = None
+qwen_voice_clone_prompt: Optional[Any] = None
 
 
 def comma_list(value: str) -> List[str]:
@@ -297,6 +323,14 @@ def resolve_tts_device() -> str:
     return TTS_DEVICE
 
 
+def active_tts_model_name() -> str:
+    if TTS_ENGINE == "qwen3_tts":
+        return QWEN_TTS_MODEL_NAME
+    if TTS_ENGINE == "chatterbox_turbo":
+        return CHATTERBOX_MODEL_NAME
+    return "unknown"
+
+
 def ensure_perth_watermarker() -> None:
     try:
         import perth
@@ -362,7 +396,7 @@ def get_chatterbox_model() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "Chatterbox Turbo is not installed. Install "
-            "services/local-ai/requirements-voice-chatterbox.txt in the voice "
+            "services/local-ai/requirements-voice.txt in the voice "
             "gateway environment."
         ) from exc
 
@@ -406,6 +440,120 @@ def get_chatterbox_model() -> Any:
         elapsed_ms(started_at),
     )
     return chatterbox_model
+
+
+def resolve_qwen_tts_dtype() -> torch.dtype:
+    if QWEN_TTS_DTYPE in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if QWEN_TTS_DTYPE in {"fp16", "float16", "half"}:
+        return torch.float16
+    if QWEN_TTS_DTYPE in {"fp32", "float32"}:
+        return torch.float32
+    raise RuntimeError(
+        "LOCAL_QWEN_TTS_DTYPE must be one of: bfloat16, float16, float32"
+    )
+
+
+def resolve_qwen_tts_device_map() -> str:
+    device = resolve_tts_device()
+    if device == "cuda":
+        return "cuda:0"
+    return device
+
+
+def get_qwen_ref_audio_path() -> str:
+    if not QWEN_TTS_REF_AUDIO_PATH:
+        raise RuntimeError(
+            "LOCAL_QWEN_TTS_REF_AUDIO_PATH is required for Qwen3-TTS voice cloning."
+        )
+
+    ref_path = Path(QWEN_TTS_REF_AUDIO_PATH).expanduser()
+    if not ref_path.is_absolute():
+        ref_path = Path.cwd() / ref_path
+    if not ref_path.exists():
+        raise RuntimeError(
+            f"LOCAL_QWEN_TTS_REF_AUDIO_PATH does not exist: {ref_path}"
+        )
+
+    return str(ref_path)
+
+
+def get_qwen_tts_model() -> Any:
+    global qwen_tts_model
+
+    if qwen_tts_model is not None:
+        return qwen_tts_model
+
+    try:
+        from qwen_tts import Qwen3TTSModel
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen3-TTS is not installed. Install "
+            "services/local-ai/requirements-voice.txt in the voice "
+            "gateway environment, then restart the gateway."
+        ) from exc
+
+    started_at = time.perf_counter()
+    load_kwargs: Dict[str, Any] = {
+        "device_map": resolve_qwen_tts_device_map(),
+        "dtype": resolve_qwen_tts_dtype(),
+    }
+    if QWEN_TTS_ATTN_IMPLEMENTATION:
+        load_kwargs["attn_implementation"] = QWEN_TTS_ATTN_IMPLEMENTATION
+
+    logger.info(
+        "voice.tts.qwen.load.start model=%s deviceMap=%s dtype=%s attn=%s refAudio=%s refText=%s",
+        QWEN_TTS_MODEL_NAME,
+        load_kwargs["device_map"],
+        QWEN_TTS_DTYPE,
+        QWEN_TTS_ATTN_IMPLEMENTATION or "default",
+        bool(QWEN_TTS_REF_AUDIO_PATH),
+        bool(QWEN_TTS_REF_TEXT),
+    )
+    qwen_tts_model = Qwen3TTSModel.from_pretrained(
+        QWEN_TTS_MODEL_NAME,
+        **load_kwargs,
+    )
+    logger.info(
+        "voice.tts.loaded engine=qwen3_tts model=%s device=%s sampleRate=%s latencyMs=%d",
+        QWEN_TTS_MODEL_NAME,
+        resolve_tts_device(),
+        TTS_SAMPLE_RATE,
+        elapsed_ms(started_at),
+    )
+    return qwen_tts_model
+
+
+def get_qwen_voice_clone_prompt() -> Any:
+    global qwen_voice_clone_prompt
+
+    if qwen_voice_clone_prompt is not None:
+        return qwen_voice_clone_prompt
+
+    model = get_qwen_tts_model()
+    ref_audio = get_qwen_ref_audio_path()
+    use_x_vector_only = QWEN_TTS_X_VECTOR_ONLY or not QWEN_TTS_REF_TEXT
+
+    if use_x_vector_only and not QWEN_TTS_REF_TEXT:
+        logger.warning(
+            "voice.tts.qwen.ref_text_missing using x_vector_only_mode=true; "
+            "set LOCAL_QWEN_TTS_REF_TEXT for stronger cloning quality"
+        )
+
+    started_at = time.perf_counter()
+    qwen_voice_clone_prompt = model.create_voice_clone_prompt(
+        ref_audio=ref_audio,
+        ref_text=None if use_x_vector_only else QWEN_TTS_REF_TEXT,
+        x_vector_only_mode=use_x_vector_only,
+    )
+    logger.info(
+        "voice.tts.qwen.clone_prompt.ready refAudio=%s refText=%s xVectorOnly=%s latencyMs=%d",
+        ref_audio,
+        bool(QWEN_TTS_REF_TEXT),
+        use_x_vector_only,
+        elapsed_ms(started_at),
+    )
+    return qwen_voice_clone_prompt
 
 
 def normalize_text_for_speech(text: str) -> str:
@@ -487,7 +635,9 @@ def strip_tts_asides(text: str) -> str:
 
 def prepare_text_for_tts_engine(text: str) -> str:
     text = normalize_text_for_speech(text)
-    return decorate_text_for_chatterbox(text)
+    if TTS_ENGINE == "chatterbox_turbo":
+        return decorate_text_for_chatterbox(text)
+    return text
 
 
 def decorate_text_for_chatterbox(text: str) -> str:
@@ -517,10 +667,10 @@ def split_text_for_tts_queue(text: str, first_phrase: bool) -> List[str]:
     if not text:
         return []
 
-    return split_chatterbox_phrases(text, first_phrase)
+    return split_tts_phrases(text, first_phrase)
 
 
-def split_chatterbox_phrases(text: str, first_phrase: bool) -> List[str]:
+def split_tts_phrases(text: str, first_phrase: bool) -> List[str]:
     phrases: List[str] = []
     remaining = text
     use_first_limit = first_phrase
@@ -533,7 +683,7 @@ def split_chatterbox_phrases(text: str, first_phrase: bool) -> List[str]:
             if use_first_limit
             else TTS_PHRASE_TARGET_CHARS,
         )
-        boundary = choose_chatterbox_phrase_boundary(remaining, limit, target)
+        boundary = choose_tts_phrase_boundary(remaining, limit, target)
         phrase = remaining[:boundary].strip()
         remaining = remaining[boundary:].strip()
 
@@ -552,7 +702,7 @@ def split_chatterbox_phrases(text: str, first_phrase: bool) -> List[str]:
     return phrases
 
 
-def choose_chatterbox_phrase_boundary(text: str, limit: int, target: int) -> int:
+def choose_tts_phrase_boundary(text: str, limit: int, target: int) -> int:
     if len(text) <= limit:
         return len(text)
 
@@ -747,11 +897,7 @@ def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
         temp_path.unlink(missing_ok=True)
 
 
-def iter_tts_audio(text: str):
-    speech_text = prepare_text_for_tts_engine(text)
-    if not speech_text:
-        return
-
+def iter_chatterbox_tts_audio(speech_text: str):
     model = get_chatterbox_model()
     started_at = time.perf_counter()
     logger.info(
@@ -784,6 +930,70 @@ def iter_tts_audio(text: str):
         elapsed_ms(started_at),
     )
     yield audio_array
+
+
+def iter_qwen_tts_audio(speech_text: str):
+    model = get_qwen_tts_model()
+    voice_clone_prompt = get_qwen_voice_clone_prompt()
+    started_at = time.perf_counter()
+    logger.info(
+        "voice.tts.qwen.generate.start chars=%d model=%s language=%s nonStreamingMode=%s temperature=%.2f topP=%.2f topK=%d",
+        len(speech_text),
+        QWEN_TTS_MODEL_NAME,
+        QWEN_TTS_LANGUAGE,
+        QWEN_TTS_NON_STREAMING_MODE,
+        QWEN_TTS_TEMPERATURE,
+        QWEN_TTS_TOP_P,
+        QWEN_TTS_TOP_K,
+    )
+    with torch.inference_mode():
+        wavs, sample_rate = model.generate_voice_clone(
+            text=speech_text,
+            language=QWEN_TTS_LANGUAGE,
+            voice_clone_prompt=voice_clone_prompt,
+            non_streaming_mode=QWEN_TTS_NON_STREAMING_MODE,
+            do_sample=QWEN_TTS_DO_SAMPLE,
+            top_k=QWEN_TTS_TOP_K,
+            top_p=QWEN_TTS_TOP_P,
+            temperature=QWEN_TTS_TEMPERATURE,
+            repetition_penalty=QWEN_TTS_REPETITION_PENALTY,
+            max_new_tokens=QWEN_TTS_MAX_NEW_TOKENS,
+        )
+
+    if not wavs:
+        logger.warning("voice.tts.qwen.generate.empty chars=%d", len(speech_text))
+        return
+
+    audio_array = audio_to_float32(wavs[0])
+    audio_array = resample_float32(audio_array, int(sample_rate), TTS_SAMPLE_RATE)
+    audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
+    logger.info(
+        "voice.tts.qwen.generate.end chars=%d samples=%d audioSeconds=%.2f sourceSampleRate=%s latencyMs=%d",
+        len(speech_text),
+        int(audio_array.size),
+        audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
+        sample_rate,
+        elapsed_ms(started_at),
+    )
+    yield audio_array
+
+
+def iter_tts_audio(text: str):
+    speech_text = prepare_text_for_tts_engine(text)
+    if not speech_text:
+        return
+
+    if TTS_ENGINE == "qwen3_tts":
+        yield from iter_qwen_tts_audio(speech_text)
+        return
+
+    if TTS_ENGINE == "chatterbox_turbo":
+        yield from iter_chatterbox_tts_audio(speech_text)
+        return
+
+    raise RuntimeError(
+        "LOCAL_TTS_ENGINE must be one of: qwen3_tts, chatterbox_turbo"
+    )
 
 
 class PcmOutputTrack(MediaStreamTrack):
@@ -2219,14 +2429,14 @@ async def main() -> None:
         STT_MODEL_NAME,
         STT_DEVICE,
         TTS_ENGINE,
-        CHATTERBOX_MODEL_NAME,
+        active_tts_model_name(),
         resolve_tts_device(),
         TTS_SAMPLE_RATE,
         len(ice_servers),
         browser_ice_transport_policy(),
     )
     logger.info(
-        "voice.tts.chatterbox.phrasing firstMax=%d target=%d max=%d turnMax=%d",
+        "voice.tts.phrasing firstMax=%d target=%d max=%d turnMax=%d",
         TTS_FIRST_PHRASE_MAX_CHARS,
         TTS_PHRASE_TARGET_CHARS,
         TTS_PHRASE_MAX_CHARS,
