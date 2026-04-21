@@ -811,15 +811,22 @@ class PcmOutputTrack(MediaStreamTrack):
         self.queued_samples = 0
         self.pts = 0
         self.started_at = time.monotonic()
+        self.generation = 0
 
-    async def enqueue_float32(self, audio: np.ndarray) -> None:
+    async def enqueue_float32(self, audio: np.ndarray, generation: int) -> bool:
         if audio.size == 0:
-            return
+            return False
+        if generation != self.generation:
+            return False
         pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16, copy=False)
+        if generation != self.generation:
+            return False
         self.queued_samples += int(pcm.size)
         await self.queue.put(pcm)
+        return True
 
-    async def clear(self) -> None:
+    async def clear(self, generation: int) -> None:
+        self.generation = generation
         self.pending = np.zeros(0, dtype=np.int16)
         self.queued_samples = 0
         while not self.queue.empty():
@@ -1410,7 +1417,9 @@ class VoiceSession:
 
         self.current_assistant_turn_id = None
         self.pending_end_turn_id = None
-        await self.output_track.clear()
+        self.last_assistant_audio_at = 0.0
+        self.assistant_audio_started_at = 0.0
+        await self.output_track.clear(self.tts_generation)
         while not self.tts_queue.empty():
             try:
                 self.tts_queue.get_nowait()
@@ -2031,10 +2040,12 @@ class VoiceSession:
 
             chunk_count += 1
             future = asyncio.run_coroutine_threadsafe(
-                self.output_track.enqueue_float32(audio),
+                self.output_track.enqueue_float32(audio, generation),
                 loop,
             )
-            future.result()
+            accepted = future.result()
+            if not accepted:
+                break
             if chunk_count == 1:
                 asyncio.run_coroutine_threadsafe(
                     self.mark_first_audio(turn_id),

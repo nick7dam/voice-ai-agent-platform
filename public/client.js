@@ -390,6 +390,7 @@ function unmuteWebRtcAudio() {
   }
 
   setWebRtcRemoteAudioEnabled(true);
+  el.webrtcAudio.volume = 1;
   el.webrtcAudio.muted = false;
   if (el.webrtcAudio.srcObject) {
     void el.webrtcAudio.play().catch(() => undefined);
@@ -403,6 +404,7 @@ function muteWebRtcAudioUntilNextAssistant() {
   }
 
   setWebRtcRemoteAudioEnabled(false);
+  el.webrtcAudio.volume = 0;
   el.webrtcAudio.muted = true;
   el.webrtcAudio.pause();
 }
@@ -438,6 +440,10 @@ function clearWebRtcAssistantPlayback() {
   state.assistantAudioTurnId = null;
   muteWebRtcAudioUntilNextAssistant();
   return turnId;
+}
+
+function isCancelledAssistantTurn(turnId) {
+  return Boolean(turnId) && state.cancelledAudioTurnIds.has(turnId);
 }
 
 function interruptWebRtcAssistantOutput(reason) {
@@ -598,6 +604,10 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.tts.started') {
+    if (isCancelledAssistantTurn(event.payload?.turnId)) {
+      setStatus('WebRTC interrupted');
+      return;
+    }
     state.assistantAudioActive = true;
     state.assistantAudioTurnId = event.payload.turnId;
     markAssistantAudioActivity(event.payload.turnId);
@@ -606,6 +616,9 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.tts.ended') {
+    if (isCancelledAssistantTurn(event.payload?.turnId)) {
+      return;
+    }
     state.assistantAudioActive = false;
     state.assistantAudioTurnId = null;
     setStatus('WebRTC listening...');
