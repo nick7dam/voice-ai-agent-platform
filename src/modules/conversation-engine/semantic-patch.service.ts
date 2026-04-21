@@ -17,18 +17,109 @@ const serviceTypeKeywords: Record<string, string[]> = {
   repair: ['repair', 'fix', 'not working', 'issue', 'problem'],
 };
 
+type CaptureSlotKey =
+  | 'vehicleRegistration'
+  | 'phoneNumber'
+  | 'customerEmail'
+  | 'customerName'
+  | null;
+
 const numberWords = new Map<string, string>([
   ['zero', '0'],
   ['oh', '0'],
+  ['o', '0'],
+  ['won', '1'],
   ['one', '1'],
+  ['to', '2'],
+  ['too', '2'],
   ['two', '2'],
   ['three', '3'],
+  ['for', '4'],
+  ['fore', '4'],
   ['four', '4'],
   ['five', '5'],
   ['six', '6'],
   ['seven', '7'],
+  ['ate', '8'],
   ['eight', '8'],
   ['nine', '9'],
+]);
+
+const spokenLetterWords = new Map<string, string>([
+  ['a', 'A'],
+  ['ay', 'A'],
+  ['b', 'B'],
+  ['bee', 'B'],
+  ['be', 'B'],
+  ['c', 'C'],
+  ['cee', 'C'],
+  ['sea', 'C'],
+  ['see', 'C'],
+  ['d', 'D'],
+  ['dee', 'D'],
+  ['e', 'E'],
+  ['ee', 'E'],
+  ['f', 'F'],
+  ['ef', 'F'],
+  ['g', 'G'],
+  ['gee', 'G'],
+  ['h', 'H'],
+  ['aitch', 'H'],
+  ['haitch', 'H'],
+  ['i', 'I'],
+  ['eye', 'I'],
+  ['j', 'J'],
+  ['jay', 'J'],
+  ['k', 'K'],
+  ['kay', 'K'],
+  ['l', 'L'],
+  ['el', 'L'],
+  ['m', 'M'],
+  ['em', 'M'],
+  ['n', 'N'],
+  ['en', 'N'],
+  ['o', 'O'],
+  ['p', 'P'],
+  ['pee', 'P'],
+  ['q', 'Q'],
+  ['cue', 'Q'],
+  ['queue', 'Q'],
+  ['r', 'R'],
+  ['are', 'R'],
+  ['ar', 'R'],
+  ['s', 'S'],
+  ['ess', 'S'],
+  ['t', 'T'],
+  ['tee', 'T'],
+  ['tea', 'T'],
+  ['u', 'U'],
+  ['you', 'U'],
+  ['v', 'V'],
+  ['vee', 'V'],
+  ['w', 'W'],
+  ['doubleyou', 'W'],
+  ['doubleu', 'W'],
+  ['x', 'X'],
+  ['ex', 'X'],
+  ['y', 'Y'],
+  ['why', 'Y'],
+  ['wye', 'Y'],
+  ['z', 'Z'],
+  ['zee', 'Z'],
+  ['zed', 'Z'],
+]);
+
+const emailSymbolWords = new Map<string, string>([
+  ['at', '@'],
+  ['dot', '.'],
+  ['period', '.'],
+  ['point', '.'],
+  ['underscore', '_'],
+  ['under score', '_'],
+  ['dash', '-'],
+  ['hyphen', '-'],
+  ['minus', '-'],
+  ['plus', '+'],
 ]);
 
 @Injectable()
@@ -45,7 +136,12 @@ export class SemanticPatchService {
       .join(' ')
       .replace(/\s+/g, ' ')
       .trim();
-    const incompleteReason = this.detectIncompleteThought(profile, combinedThought);
+    const captureTarget = this.resolveCaptureTarget(session, profile, combinedThought);
+    const incompleteReason = this.detectIncompleteThought(
+      profile,
+      combinedThought,
+      captureTarget,
+    );
 
     const patches: SemanticPatch[] = [
       {
@@ -83,7 +179,7 @@ export class SemanticPatchService {
       });
     }
 
-    const slotUpdates = this.extractCarBookingSlots(combinedThought);
+    const slotUpdates = this.extractCarBookingSlots(combinedThought, captureTarget);
     for (const slotUpdate of slotUpdates) {
       patches.push({
         type: 'upsert_slot',
@@ -114,6 +210,7 @@ export class SemanticPatchService {
   private detectIncompleteThought(
     profile: ConversationProfile,
     text: string,
+    captureTarget: CaptureSlotKey,
   ): string | null {
     const lower = text.trim().toLowerCase();
     if (!lower) {
@@ -155,9 +252,47 @@ export class SemanticPatchService {
 
     if (
       /\b(rego|registration|plate)\b/.test(lower) &&
-      !this.extractRegistration(lower)
+      !this.extractRegistration(lower, 'vehicleRegistration')
     ) {
       return 'registration_incomplete';
+    }
+
+    if (captureTarget === 'vehicleRegistration') {
+      const candidate = this.extractSpokenRegistrationCandidate(text);
+      if (candidate && candidate.length < 4) {
+        return 'registration_capture_incomplete';
+      }
+      if (!candidate && this.looksLikeSpelledRegistration(text)) {
+        return 'registration_capture_incomplete';
+      }
+    }
+
+    if (captureTarget === 'phoneNumber') {
+      const digits = this.extractDigitString(text.toLowerCase(), true);
+      if (digits.length > 0 && digits.length < 8) {
+        return 'phone_capture_incomplete';
+      }
+    }
+
+    if (captureTarget === 'customerEmail') {
+      const emailCandidate = this.extractSpokenEmailCandidate(text);
+      if (emailCandidate && !this.isEmailAddress(emailCandidate)) {
+        return 'email_capture_incomplete';
+      }
+      if (
+        !emailCandidate &&
+        /\b(email|at|dot|underscore|dash|hyphen)\b/i.test(text)
+      ) {
+        return 'email_capture_incomplete';
+      }
+    }
+
+    if (
+      captureTarget === 'customerName' &&
+      this.looksLikeSpelledName(text) &&
+      this.extractSpelledNameCandidate(text).length < 2
+    ) {
+      return 'name_capture_incomplete';
     }
 
     const wordCount = lower.split(/\s+/).filter(Boolean).length;
@@ -177,7 +312,10 @@ export class SemanticPatchService {
     return null;
   }
 
-  private extractCarBookingSlots(text: string): Array<{
+  private extractCarBookingSlots(
+    text: string,
+    captureTarget: CaptureSlotKey,
+  ): Array<{
     slotKey: string;
     value: string;
     canonicalValue?: string | null;
@@ -200,33 +338,45 @@ export class SemanticPatchService {
       });
     }
 
-    const registration = this.extractRegistration(text);
+    const registration = this.extractRegistration(text, captureTarget);
     if (registration) {
       updates.push({
         slotKey: 'vehicleRegistration',
         value: registration,
         canonicalValue: registration,
-        confidence: 0.9,
+        confidence:
+          captureTarget === 'vehicleRegistration' ? 0.95 : 0.9,
       });
     }
 
-    const name = this.extractCustomerName(text);
+    const name = this.extractCustomerName(text, captureTarget);
     if (name) {
       updates.push({
         slotKey: 'customerName',
         value: name,
         canonicalValue: name,
-        confidence: 0.78,
+        confidence:
+          captureTarget === 'customerName' ? 0.9 : 0.78,
       });
     }
 
-    const phoneNumber = this.extractPhoneNumber(text);
+    const phoneNumber = this.extractPhoneNumber(text, captureTarget);
     if (phoneNumber) {
       updates.push({
         slotKey: 'phoneNumber',
         value: phoneNumber.display,
         canonicalValue: phoneNumber.canonical,
         confidence: phoneNumber.confidence,
+      });
+    }
+
+    const customerEmail = this.extractCustomerEmail(text, captureTarget);
+    if (customerEmail) {
+      updates.push({
+        slotKey: 'customerEmail',
+        value: customerEmail,
+        canonicalValue: customerEmail,
+        confidence: 0.92,
       });
     }
 
@@ -286,31 +436,69 @@ export class SemanticPatchService {
     return null;
   }
 
-  private extractCustomerName(text: string): string | null {
+  private extractCustomerName(
+    text: string,
+    captureTarget: CaptureSlotKey,
+  ): string | null {
     const match = text.match(
       /\b(?:my name is|this is|i am|i'm)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\b/i,
     );
-    return match?.[1]
+    const explicitName = match?.[1]
       ?.trim()
       .split(/\s+/)
       .map((part) =>
         part ? `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}` : '',
       )
       .join(' ')
-      .trim() ?? null;
+      .trim();
+
+    if (explicitName) {
+      return explicitName;
+    }
+
+    if (captureTarget !== 'customerName') {
+      return null;
+    }
+
+    const stripped = this.stripSlotLeadIn(text, [
+      /\b(?:my name is|this is|i am|i'm|name is|customer name is)\b/gi,
+      /\b(?:it'?s|that is|thats)\b/gi,
+      /\b(?:spelled|spell that|spell it)\b/gi,
+    ]);
+    const spelled = this.extractSpelledNameCandidate(stripped);
+    if (spelled.length >= 2) {
+      return spelled;
+    }
+
+    if (this.looksLikePlainName(stripped)) {
+      return this.toTitleCase(stripped);
+    }
+
+    return null;
   }
 
-  private extractPhoneNumber(text: string): {
+  private extractPhoneNumber(
+    text: string,
+    captureTarget: CaptureSlotKey,
+  ): {
     canonical: string;
     display: string;
     confidence: number;
   } | null {
     const lower = text.toLowerCase();
-    if (!/\b(phone|mobile|number|call me on|reach me on|best number)\b/.test(lower)) {
+    const explicit =
+      /\b(phone|mobile|number|call me on|reach me on|best number)\b/.test(lower);
+    if (!explicit && captureTarget !== 'phoneNumber') {
       return null;
     }
 
-    const digits = this.extractDigitString(lower);
+    const digits = this.extractDigitString(
+      this.stripSlotLeadIn(text, [
+        /\b(?:my|the)?\s*(?:phone|mobile|number)\s+(?:is|number is)\b/gi,
+        /\b(?:call me on|reach me on|best number is)\b/gi,
+      ]).toLowerCase(),
+      true,
+    );
     if (digits.length < 8) {
       return null;
     }
@@ -319,11 +507,20 @@ export class SemanticPatchService {
     return {
       canonical,
       display: canonical.replace(/(\d{4})(?=\d)/g, '$1 ').trim(),
-      confidence: canonical.length >= 10 ? 0.94 : 0.68,
+      confidence:
+        canonical.length >= 10
+          ? captureTarget === 'phoneNumber'
+            ? 0.97
+            : 0.94
+          : 0.68,
     };
   }
 
-  private extractRegistration(text: string): string | null {
+  private extractRegistration(
+    text: string,
+    captureTarget: CaptureSlotKey,
+  ): string | null {
+    const explicit = /\b(rego|registration|plate)\b/i.test(text);
     const cleaned = text
       .toUpperCase()
       .replace(/[^A-Z0-9\s]/g, ' ')
@@ -337,6 +534,15 @@ export class SemanticPatchService {
       if (!/[A-Z]/.test(candidate) || !/\d/.test(candidate)) {
         continue;
       }
+      return candidate;
+    }
+
+    if (!explicit && captureTarget !== 'vehicleRegistration') {
+      return null;
+    }
+
+    const candidate = this.extractSpokenRegistrationCandidate(text);
+    if (candidate.length >= 4 && candidate.length <= 8) {
       return candidate;
     }
 
@@ -370,7 +576,25 @@ export class SemanticPatchService {
     return null;
   }
 
-  private extractDigitString(text: string): string {
+  private extractCustomerEmail(
+    text: string,
+    captureTarget: CaptureSlotKey,
+  ): string | null {
+    const lower = text.toLowerCase();
+    const explicit = /\b(email|e-mail|email address)\b/.test(lower);
+    if (!explicit && captureTarget !== 'customerEmail') {
+      return null;
+    }
+
+    const stripped = this.stripSlotLeadIn(text, [
+      /\b(?:my|the)?\s*(?:email|e-mail|email address)\s+(?:is|address is)\b/gi,
+      /\b(?:contact email is|send it to)\b/gi,
+    ]);
+    const candidate = this.extractSpokenEmailCandidate(stripped);
+    return this.isEmailAddress(candidate) ? candidate : null;
+  }
+
+  private extractDigitString(text: string, _aggressive = false): string {
     const normalizedWords = text
       .replace(/\bdouble\s+([a-z]+)\b/g, (_match, value: string) => {
         const digit = numberWords.get(value) ?? '';
@@ -385,5 +609,231 @@ export class SemanticPatchService {
       .join(' ');
 
     return normalizedWords.replace(/\D/g, '');
+  }
+
+  private resolveCaptureTarget(
+    session: SessionState,
+    profile: ConversationProfile,
+    text: string,
+  ): CaptureSlotKey {
+    const lower = text.toLowerCase();
+    if (/\b(email|e-mail|email address)\b/.test(lower)) {
+      return 'customerEmail';
+    }
+    if (/\b(phone|mobile|number|call me on|reach me on)\b/.test(lower)) {
+      return 'phoneNumber';
+    }
+    if (/\b(rego|registration|plate)\b/.test(lower)) {
+      return 'vehicleRegistration';
+    }
+    if (/\b(my name is|this is|i am|i'm|name is)\b/.test(lower)) {
+      return 'customerName';
+    }
+
+    const promptedSlot = session.conversation?.lastDecision?.slotKey;
+    if (
+      promptedSlot === 'vehicleRegistration' ||
+      promptedSlot === 'phoneNumber' ||
+      promptedSlot === 'customerEmail' ||
+      promptedSlot === 'customerName'
+    ) {
+      return promptedSlot;
+    }
+
+    const nextMissingActionSlot = profile.actionReadySlotKeys.find((slotKey) => {
+      const slot = session.conversation?.liveIntent.slots[slotKey];
+      return !slot?.value;
+    });
+
+    if (
+      nextMissingActionSlot === 'vehicleRegistration' ||
+      nextMissingActionSlot === 'phoneNumber' ||
+      nextMissingActionSlot === 'customerName'
+    ) {
+      return nextMissingActionSlot;
+    }
+
+    return null;
+  }
+
+  private extractSpokenRegistrationCandidate(text: string): string {
+    const stripped = this.stripSlotLeadIn(text, [
+      /\b(?:the\s+)?(?:vehicle\s+)?(?:registration|rego|plate)(?:\s+(?:is|number is))?\b/gi,
+      /\b(?:it'?s|that is|thats)\b/gi,
+    ]);
+    const tokens = this.tokenizeCaptureInput(stripped);
+    const characters = tokens
+      .map((token) => this.normalizeCaptureToken(token, 'vehicleRegistration'))
+      .filter(Boolean)
+      .join('')
+      .replace(/[^A-Z0-9]/g, '');
+
+    return characters.slice(0, 8);
+  }
+
+  private looksLikeSpelledRegistration(text: string): boolean {
+    const stripped = this.stripSlotLeadIn(text, [
+      /\b(?:the\s+)?(?:vehicle\s+)?(?:registration|rego|plate)(?:\s+(?:is|number is))?\b/gi,
+    ]);
+    const tokens = this.tokenizeCaptureInput(stripped);
+    return tokens.some(
+      (token) =>
+        Boolean(this.normalizeCaptureToken(token, 'vehicleRegistration')) ||
+        /^[A-Za-z0-9-]+$/.test(token),
+    );
+  }
+
+  private extractSpokenEmailCandidate(text: string): string {
+    const tokens = this.tokenizeCaptureInput(text);
+    const normalized = tokens
+      .map((token) => this.normalizeCaptureToken(token, 'customerEmail'))
+      .filter(Boolean)
+      .join('')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+
+    return normalized;
+  }
+
+  private extractSpelledNameCandidate(text: string): string {
+    const tokens = this.tokenizeCaptureInput(text);
+    const characters = tokens
+      .map((token) => this.normalizeCaptureToken(token, 'customerName'))
+      .filter(Boolean)
+      .join('');
+
+    if (!characters) {
+      return '';
+    }
+
+    return this.toTitleCase(characters);
+  }
+
+  private looksLikeSpelledName(text: string): boolean {
+    const stripped = this.stripSlotLeadIn(text, [
+      /\b(?:my name is|this is|i am|i'm|name is)\b/gi,
+      /\b(?:spelled|spell that|spell it)\b/gi,
+    ]);
+    const tokens = this.tokenizeCaptureInput(stripped);
+    return (
+      tokens.length > 0 &&
+      tokens.every((token) => Boolean(this.normalizeCaptureToken(token, 'customerName')))
+    );
+  }
+
+  private looksLikePlainName(text: string): boolean {
+    const cleaned = text
+      .replace(/[^A-Za-z\s'-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) {
+      return false;
+    }
+
+    if (
+      /\b(oil|service|booking|rego|registration|phone|number|email|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(
+        cleaned,
+      )
+    ) {
+      return false;
+    }
+
+    return /^[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}$/.test(cleaned);
+  }
+
+  private tokenizeCaptureInput(text: string): string[] {
+    return text
+      .toLowerCase()
+      .replace(/['’]/g, '')
+      .replace(/[@]/g, ' @ ')
+      .replace(/[.,!?/\\]/g, ' ')
+      .replace(/-/g, ' ')
+      .replace(/_/g, ' _ ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter(Boolean);
+  }
+
+  private normalizeCaptureToken(
+    token: string,
+    captureTarget: Exclude<CaptureSlotKey, null>,
+  ): string {
+    if (!token) {
+      return '';
+    }
+
+    if (captureTarget === 'customerEmail') {
+      if (emailSymbolWords.has(token)) {
+        return emailSymbolWords.get(token) ?? '';
+      }
+      if (spokenLetterWords.has(token)) {
+        return (spokenLetterWords.get(token) ?? '').toLowerCase();
+      }
+      if (numberWords.has(token)) {
+        return numberWords.get(token) ?? '';
+      }
+      if (token === '@' || token === '_' || token === '.' || token === '-') {
+        return token;
+      }
+      if (/^[a-z0-9]+$/.test(token)) {
+        return token.toLowerCase();
+      }
+      return '';
+    }
+
+    if (captureTarget === 'phoneNumber') {
+      if (numberWords.has(token)) {
+        return numberWords.get(token) ?? '';
+      }
+      if (/^\d+$/.test(token)) {
+        return token;
+      }
+      return '';
+    }
+
+    if (captureTarget === 'customerName') {
+      if (spokenLetterWords.has(token)) {
+        return (spokenLetterWords.get(token) ?? '').toLowerCase();
+      }
+      if (/^[a-z]+$/.test(token) && token.length === 1) {
+        return token.toLowerCase();
+      }
+      return '';
+    }
+
+    if (spokenLetterWords.has(token)) {
+      return spokenLetterWords.get(token) ?? '';
+    }
+    if (numberWords.has(token)) {
+      return numberWords.get(token) ?? '';
+    }
+    if (/^[a-z0-9]+$/i.test(token)) {
+      return token.toUpperCase();
+    }
+
+    return '';
+  }
+
+  private stripSlotLeadIn(text: string, patterns: RegExp[]): string {
+    return patterns
+      .reduce((value, pattern) => value.replace(pattern, ' '), text)
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private isEmailAddress(text: string): boolean {
+    return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(text);
+  }
+
+  private toTitleCase(text: string): string {
+    return text
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) =>
+        part ? `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}` : '',
+      )
+      .join(' ')
+      .trim();
   }
 }

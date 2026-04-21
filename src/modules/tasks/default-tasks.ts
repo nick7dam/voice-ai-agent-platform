@@ -39,6 +39,7 @@ export const defaultTasks: TaskConfig[] = [
       'Do not use markdown, JSON, code blocks, tool call syntax, SSML, or stage directions.',
       'Use the live booking details already collected. Do not ask again for details that are already confirmed unless the caller corrects them.',
       'If the caller pauses mid-thought, wait for the rest of the thought instead of jumping in too early.',
+      'Customers may spell registrations, names, phone numbers, or email addresses one character or number at a time. Treat spelled sequences as the intended booking detail when they fit the current question.',
       'Only say you have found customer, vehicle, or booking records when that has actually been confirmed by a tool or system result.',
       'If a key booking detail is missing, ask for just the next most useful detail.',
       'Say times naturally, for example "two in the afternoon" instead of "2:00 PM".',

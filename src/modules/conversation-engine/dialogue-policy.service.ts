@@ -31,9 +31,7 @@ export class DialoguePolicyService {
     }
 
     const incompleteReason = state.pendingThought.incompleteReason;
-    const delayMs = incompleteReason
-      ? profile.incompleteHoldMs
-      : profile.defaultHoldMs;
+    const delayMs = this.resolveDelayMs(profile, incompleteReason);
 
     return {
       action: 'wait',
@@ -180,5 +178,24 @@ export class DialoguePolicyService {
       const slot = state.slots[slotKey];
       return Boolean(slot?.value);
     });
+  }
+
+  private resolveDelayMs(
+    profile: ConversationProfile,
+    incompleteReason: string | null,
+  ): number {
+    if (!incompleteReason) {
+      return profile.defaultHoldMs;
+    }
+
+    if (
+      /(?:registration|phone|email|name)_capture_incomplete/.test(
+        incompleteReason,
+      )
+    ) {
+      return Math.max(profile.incompleteHoldMs, 2600);
+    }
+
+    return profile.incompleteHoldMs;
   }
 }

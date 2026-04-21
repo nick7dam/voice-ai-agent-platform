@@ -43,6 +43,7 @@ const carBookingReceptionistProfile: ConversationProfile = {
     'vehicleRegistration',
     'customerName',
     'phoneNumber',
+    'customerEmail',
     'preferredDate',
     'preferredTime',
     'issueDescription',
@@ -66,20 +67,30 @@ const carBookingReceptionistProfile: ConversationProfile = {
       label: 'vehicle registration',
       required: true,
       confirmationRequired: true,
-      askPrompt: 'What is the vehicle registration?',
+      askPrompt:
+        'What is the vehicle registration? You can say it one character at a time, like A B C 1 2 3.',
     },
     customerName: {
       key: 'customerName',
       label: 'customer name',
       required: true,
-      askPrompt: 'Can I get your name for the booking?',
+      askPrompt:
+        'Can I get your name for the booking? You can spell it if that is easier.',
     },
     phoneNumber: {
       key: 'phoneNumber',
       label: 'phone number',
       required: true,
       confirmationRequired: true,
-      askPrompt: 'What is the best phone number for the booking?',
+      askPrompt:
+        'What is the best phone number for the booking? You can say the digits one at a time.',
+    },
+    customerEmail: {
+      key: 'customerEmail',
+      label: 'email address',
+      required: false,
+      askPrompt:
+        "Would you like to add an email address for the booking? You can say it like name at gmail dot com.",
     },
     preferredDate: {
       key: 'preferredDate',
