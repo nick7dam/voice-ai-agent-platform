@@ -3,6 +3,7 @@ const vadConfig = {
   noiseMultiplier: 3,
   bargeInThresholdMultiplier: 2.4,
   bargeInMinPeakLevel: 0.055,
+  bargeInPreviewHoldMs: 90,
   bargeInHoldMs: 120,
   assistantAudioGraceMs: 1500,
 };
@@ -483,7 +484,7 @@ function runWebRtcBargeInLoop() {
     state.webrtcBargeInCandidateMs += deltaMs;
 
     if (
-      state.webrtcBargeInCandidateMs >= 60 &&
+      state.webrtcBargeInCandidateMs >= vadConfig.bargeInPreviewHoldMs &&
       !state.webrtcBargeInMutedCandidate
     ) {
       muteWebRtcAudioUntilNextAssistant();
@@ -570,9 +571,6 @@ function handleWebRtcGatewayEvent(event) {
   }
 
   if (event.type === 'gateway.speech.started') {
-    if (event.payload?.startedDuringAssistant) {
-      clearWebRtcAssistantPlayback();
-    }
     setStatus('WebRTC heard speech');
   }
 

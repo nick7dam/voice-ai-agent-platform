@@ -98,7 +98,7 @@ TTS_FIRST_PHRASE_MAX_CHARS = max(
     TTS_MIN_PHRASE_CHARS, int(os.getenv("VOICE_TTS_FIRST_PHRASE_MAX_CHARS", "95"))
 )
 TTS_MAX_SPOKEN_CHARS_PER_TURN = max(
-    0, int(os.getenv("VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN", "260"))
+    0, int(os.getenv("VOICE_TTS_MAX_SPOKEN_CHARS_PER_TURN", "0"))
 )
 TTS_TRIM_SILENCE = env_bool("VOICE_TTS_TRIM_SILENCE", True)
 TTS_TRIM_SILENCE_THRESHOLD = float(
@@ -113,7 +113,8 @@ SILENCE_MS = int(os.getenv("VOICE_VAD_SILENCE_MS", "420"))
 MAX_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MAX_UTTERANCE_MS", "8000"))
 MIN_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MIN_UTTERANCE_MS", "320"))
 MIN_SPEECH_MS = int(os.getenv("VOICE_VAD_MIN_SPEECH_MS", "240"))
-MIN_BARGE_SPEECH_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_MS", "240"))
+MIN_BARGE_SPEECH_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_MS", "160"))
+MIN_BARGE_AUDIO_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_AUDIO_MS", "120"))
 END_THRESHOLD_PEAK_RATIO = float(os.getenv("VOICE_VAD_END_PEAK_RATIO", "0.35"))
 MIN_PEAK_LEVEL = float(os.getenv("VOICE_VAD_MIN_PEAK_LEVEL", "0.035"))
 BARGE_MIN_PEAK_LEVEL = float(os.getenv("VOICE_VAD_BARGE_MIN_PEAK_LEVEL", "0.055"))
@@ -122,6 +123,7 @@ BARGE_THRESHOLD_MULTIPLIER = float(
 )
 BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "140"))
 BARGE_START_GRACE_MS = int(os.getenv("VOICE_VAD_BARGE_START_GRACE_MS", "350"))
+BARGE_PREROLL_MS = int(os.getenv("VOICE_VAD_BARGE_PREROLL_MS", "140"))
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 TRANSCRIPT_COALESCING_ENABLED = env_bool("VOICE_TRANSCRIPT_COALESCING_ENABLED", True)
 TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "650"))
@@ -1082,6 +1084,15 @@ class VoiceActivityDetector:
         ]
         self.preroll.append((now, samples))
 
+    def get_preroll_chunks(self, now: float, preroll_ms: int) -> list[np.ndarray]:
+        cutoff = now - preroll_ms / 1000
+        chunks = [
+            chunk for captured_at, chunk in self.preroll if captured_at >= cutoff
+        ]
+        if len(chunks) > 1:
+            return chunks[:-1]
+        return []
+
     def should_start(self, level: float, threshold: float, duration_ms: float) -> bool:
         if not self.session.is_assistant_interruptible():
             self.barge_candidate_ms = 0
@@ -1107,10 +1118,9 @@ class VoiceActivityDetector:
     async def start_turn(self, now: float, threshold: float) -> None:
         started_during_assistant = self.session.is_assistant_interruptible()
         if started_during_assistant:
-            await self.session.interrupt_assistant("barge_in_started")
-            preroll_chunks: list[np.ndarray] = []
+            preroll_chunks = self.get_preroll_chunks(now, BARGE_PREROLL_MS)
         else:
-            preroll_chunks = [chunk for _, chunk in self.preroll[:-1]]
+            preroll_chunks = self.get_preroll_chunks(now, PREROLL_MS)
 
         await self.session.note_user_speech_started()
         self.current_turn = VadTurn(
@@ -1143,9 +1153,10 @@ class VoiceActivityDetector:
             BARGE_MIN_PEAK_LEVEL if turn.started_during_assistant else MIN_PEAK_LEVEL,
             turn.threshold_at_start * 1.15,
         )
+        min_audio_ms = MIN_BARGE_AUDIO_MS if turn.started_during_assistant else 180
         samples = turn.samples
         accepted = (
-            samples.size >= int(INPUT_SAMPLE_RATE * 0.18)
+            samples.size >= int(INPUT_SAMPLE_RATE * min_audio_ms / 1000)
             and turn.speech_ms >= min_speech
             and turn.max_level >= required_peak
         )
@@ -1164,6 +1175,9 @@ class VoiceActivityDetector:
             )
             await self.session.resume_pending_transcript_commit("discarded_speech")
             return
+
+        if turn.started_during_assistant:
+            await self.session.interrupt_assistant("barge_in_confirmed")
 
         await self.session.enqueue_user_audio(samples)
 
