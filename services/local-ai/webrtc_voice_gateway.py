@@ -1066,6 +1066,13 @@ def join_transcript_fragments(parts: List[str]) -> str:
     return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
 
 
+def turn_sequence_number(turn_id: str) -> int:
+    match = re.fullmatch(r"turn-(\d+)", turn_id.strip())
+    if not match:
+        return 0
+    return int(match.group(1))
+
+
 def clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
@@ -1536,14 +1543,17 @@ class VoiceSession:
         self.stt_queue: asyncio.Queue[Tuple[int, np.ndarray]] = asyncio.Queue(
             maxsize=STT_QUEUE_MAX_SIZE
         )
-        self.tts_queue: asyncio.Queue[Tuple[str, str]] = asyncio.Queue()
+        self.tts_queue: asyncio.Queue[Tuple[str, str, int]] = asyncio.Queue()
         self.tts_worker_task = asyncio.create_task(self.tts_worker())
         self.stt_worker_task = asyncio.create_task(self.stt_worker())
         self.current_assistant_turn_id: Optional[str] = None
+        self.playing_assistant_turn_id: Optional[str] = None
         self.cancelled_turn_ids: Set[str] = set()
         self.turns_with_spoken_chunks: Set[str] = set()
         self.spoken_chars_by_turn: Dict[str, int] = {}
+        self.queued_phrase_counts: Dict[str, int] = {}
         self.tts_generation = 0
+        self.latest_assistant_turn_number = 0
         self.assistant_speaking = False
         self.last_assistant_audio_at = 0.0
         self.assistant_audio_started_at = 0.0
@@ -1678,15 +1688,54 @@ class VoiceSession:
         if self.control:
             await self.control.interrupt(reason)
 
+    def mark_turn_cancelled(self, turn_id: Optional[str]) -> None:
+        if turn_id:
+            self.cancelled_turn_ids.add(turn_id)
+
+    async def note_assistant_turn_received(self, turn_id: str) -> bool:
+        turn_number = turn_sequence_number(turn_id)
+        if not turn_number:
+            return True
+
+        if turn_number < self.latest_assistant_turn_number:
+            logger.info(
+                "voice.tts.skip_stale_turn turn=%s latestTurn=%d",
+                turn_id,
+                self.latest_assistant_turn_number,
+            )
+            self.mark_turn_cancelled(turn_id)
+            return False
+
+        if turn_number > self.latest_assistant_turn_number:
+            self.latest_assistant_turn_number = turn_number
+            if self.has_pending_assistant_audio():
+                await self.clear_assistant_audio(
+                    "superseded_by_new_assistant_turn",
+                )
+
+        return True
+
     async def clear_assistant_audio(self, reason: str) -> None:
         self.tts_generation += 1
-        if self.current_assistant_turn_id:
-            self.cancelled_turn_ids.add(self.current_assistant_turn_id)
+        turn_ids_to_cancel = set(self.queued_phrase_counts)
+        turn_ids_to_cancel.update(
+            turn_id
+            for turn_id in [
+                self.current_assistant_turn_id,
+                self.playing_assistant_turn_id,
+                self.pending_end_turn_id,
+            ]
+            if turn_id
+        )
+        for turn_id in turn_ids_to_cancel:
+            self.mark_turn_cancelled(turn_id)
 
         self.current_assistant_turn_id = None
+        self.playing_assistant_turn_id = None
         self.pending_end_turn_id = None
         self.last_assistant_audio_at = 0.0
         self.assistant_audio_started_at = 0.0
+        self.queued_phrase_counts.clear()
         await self.output_track.clear(self.tts_generation)
         while not self.tts_queue.empty():
             try:
@@ -2139,6 +2188,9 @@ class VoiceSession:
         if self.call_ending or not TTS_ENABLED:
             return
 
+        if not await self.note_assistant_turn_received(turn_id):
+            return
+
         if turn_id in self.cancelled_turn_ids:
             return
 
@@ -2155,6 +2207,9 @@ class VoiceSession:
         await self.mark_first_text(turn_id)
 
         if self.call_ending or not TTS_ENABLED:
+            return
+
+        if not await self.note_assistant_turn_received(turn_id):
             return
 
         if turn_id in self.cancelled_turn_ids or turn_id in self.turns_with_spoken_chunks:
@@ -2206,7 +2261,10 @@ class VoiceSession:
                 self.turns_with_spoken_chunks.add(turn_id)
 
             self.spoken_chars_by_turn[turn_id] = used_chars + len(phrase)
-            await self.tts_queue.put((turn_id, phrase))
+            self.queued_phrase_counts[turn_id] = (
+                self.queued_phrase_counts.get(turn_id, 0) + 1
+            )
+            await self.tts_queue.put((turn_id, phrase, self.tts_generation))
             queued += 1
             queued_chars += len(phrase)
 
@@ -2222,26 +2280,24 @@ class VoiceSession:
 
     async def tts_worker(self) -> None:
         while not self.closed:
-            turn_id, text = await self.tts_queue.get()
-            generation = self.tts_generation
-
-            if turn_id in self.cancelled_turn_ids:
-                self.tts_queue.task_done()
-                continue
-
-            self.assistant_speaking = True
-            self.last_assistant_audio_at = time.monotonic()
-            self.assistant_audio_started_at = self.last_assistant_audio_at
+            turn_id, text, generation = await self.tts_queue.get()
             started_at = time.perf_counter()
-            await self.send_browser_event(
-                {
-                    "type": "gateway.tts.started",
-                    "timestamp": now_iso(),
-                    "payload": {"turnId": turn_id, "chars": len(text)},
-                }
-            )
-
             try:
+                if generation != self.tts_generation or turn_id in self.cancelled_turn_ids:
+                    continue
+
+                self.playing_assistant_turn_id = turn_id
+                self.assistant_speaking = True
+                self.last_assistant_audio_at = time.monotonic()
+                self.assistant_audio_started_at = self.last_assistant_audio_at
+                await self.send_browser_event(
+                    {
+                        "type": "gateway.tts.started",
+                        "timestamp": now_iso(),
+                        "payload": {"turnId": turn_id, "chars": len(text)},
+                    }
+                )
+
                 await self.synthesize_to_track(turn_id, text, generation)
             except asyncio.CancelledError:
                 raise
@@ -2260,7 +2316,14 @@ class VoiceSession:
                     }
                 )
             finally:
+                remaining = self.queued_phrase_counts.get(turn_id, 0) - 1
+                if remaining > 0:
+                    self.queued_phrase_counts[turn_id] = remaining
+                else:
+                    self.queued_phrase_counts.pop(turn_id, None)
                 self.tts_queue.task_done()
+                if self.playing_assistant_turn_id == turn_id:
+                    self.playing_assistant_turn_id = None
                 if self.tts_queue.empty():
                     drained = await self.wait_output_audio_drained(
                         stop_if_tts_queue_fills=True
