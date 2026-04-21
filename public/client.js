@@ -924,7 +924,7 @@ async function startWebRtcVoice() {
   signalSocket.send(
     JSON.stringify({
       type: 'start',
-      taskKey: el.taskKey.value.trim() || 'general_voice_assistant',
+      taskKey: el.taskKey.value.trim() || 'car_booking_receptionist',
     }),
   );
   logWebRtcSetup('session.start.sent');

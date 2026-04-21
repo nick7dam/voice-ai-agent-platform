@@ -1,3 +1,5 @@
+import { DialogueAction } from './conversation.types';
+
 export type ClientEventType =
   | 'session.start'
   | 'text.message'
@@ -9,7 +11,9 @@ export type ServerEventType =
   | 'session.ended'
   | 'session.interrupted'
   | 'session.end_requested'
+  | 'transcript.pending'
   | 'transcript.final'
+  | 'policy.decision'
   | 'reasoning.started'
   | 'reasoning.first_token'
   | 'assistant.text.chunk'
@@ -49,8 +53,21 @@ export type ServerEvent =
   | BaseServerEvent<'session.interrupted', { reason?: string }>
   | BaseServerEvent<'session.end_requested', { turnId: string; reason: string }>
   | BaseServerEvent<
+      'transcript.pending',
+      { text: string; delayMs: number; reason: string }
+    >
+  | BaseServerEvent<
       'transcript.final',
       { turnId: string; text: string; latencyMs: number }
+    >
+  | BaseServerEvent<
+      'policy.decision',
+      {
+        action: DialogueAction;
+        reason: string;
+        slotKey?: string;
+        shouldReason: boolean;
+      }
     >
   | BaseServerEvent<'reasoning.started', { turnId: string }>
   | BaseServerEvent<

@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { DialogueDecision } from '../../common/types/conversation.types';
 import { ChatMessage } from '../../common/types/reasoning.types';
 import { SessionState } from '../../common/types/session.types';
 import { TaskConfig } from '../tasks/task-config.types';
@@ -9,6 +10,9 @@ export class PromptBuilderService {
     session: SessionState,
     task: TaskConfig,
     currentUserText: string,
+    options?: {
+      decision?: DialogueDecision | null;
+    },
   ): ChatMessage[] {
     const recentHistory = session.history.slice(-8);
     const systemSections = [
@@ -33,6 +37,7 @@ export class PromptBuilderService {
         '- Prefer concise replies unless the task or the user clearly asks for more detail.',
         '- If the conversation is clearly finished, include [[END_CALL]] at the very end.',
       ].join('\n'),
+      this.describeConversationState(session, options?.decision),
     ];
 
     return [
@@ -90,5 +95,49 @@ export class PromptBuilderService {
       '- Continue naturally from the interrupted topic instead of restarting from scratch.',
       `- Interrupted assistant reply: "${interrupted.text}"`,
     ].join('\n');
+  }
+
+  private describeConversationState(
+    session: SessionState,
+    decision?: DialogueDecision | null,
+  ): string {
+    const liveIntent = session.conversation?.liveIntent;
+    if (!liveIntent) {
+      return 'Conversation state: none.';
+    }
+
+    const slotLines = Object.values(liveIntent.slots).map((slot) => {
+      const value = slot.value ? `"${slot.value}"` : 'missing';
+      return `- ${slot.label}: ${value} [${slot.status}]`;
+    });
+
+    const sections = [
+      'Conversation state:',
+      `- Profile: ${liveIntent.profileKey}`,
+      `- Intent: ${liveIntent.intent.name ?? 'unknown'} [${liveIntent.intent.status}]`,
+      `- Floor: ${liveIntent.floor.state} (stability ${liveIntent.floor.stability.toFixed(2)})`,
+      `- Latest committed user thought: ${liveIntent.latestCommittedThought ? `"${liveIntent.latestCommittedThought}"` : 'none'}`,
+      `- Pending thought: ${liveIntent.pendingThought.text ? `"${liveIntent.pendingThought.text}"` : 'none'} [${liveIntent.pendingThought.status}]`,
+      slotLines.length ? `Slots:\n${slotLines.join('\n')}` : 'Slots: none.',
+      decision
+        ? [
+            'Dialogue policy:',
+            `- Action: ${decision.action}`,
+            `- Reason: ${decision.reason}`,
+            decision.slotKey ? `- Focus slot: ${decision.slotKey}` : null,
+            `- Use reasoning: ${String(Boolean(decision.shouldReason))}`,
+          ]
+            .filter(Boolean)
+            .join('\n')
+        : 'Dialogue policy: none.',
+      [
+        'State usage rules:',
+        '- Treat confirmed slot values as the source of truth unless the user corrects them.',
+        '- Do not ask again for details that are already confirmed unless the user changes them.',
+        '- If the live intent already contains enough booking context, continue from that context instead of restarting the intake.',
+      ].join('\n'),
+    ];
+
+    return sections.join('\n');
   }
 }

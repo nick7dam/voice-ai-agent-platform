@@ -10,10 +10,12 @@ import { IncomingMessage, Server as HttpServer } from 'node:http';
 import { Socket } from 'node:net';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { APP_CONFIG } from '../../common/constants/injection-tokens';
+import { DialogueAction } from '../../common/types/conversation.types';
 import { AppError, toErrorPayload } from '../../common/types/errors';
 import { ServerEvent } from '../../common/types/realtime-events';
 import { nowIso } from '../../common/utils/timing';
 import * as appConfig from '../../config/app.config';
+import { ConversationEngineService } from '../conversation-engine/conversation-engine.service';
 import { OrchestratorService } from '../orchestrator/orchestrator.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { TaskRegistryService } from '../tasks/task-registry.service';
@@ -28,12 +30,17 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RealtimeGatewayService.name);
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly clients = new Map<WebSocket, ClientContext>();
+  private readonly pendingThoughtTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private httpServer?: HttpServer;
 
   constructor(
     private readonly httpAdapterHost: HttpAdapterHost,
     @Inject(APP_CONFIG) private readonly config: appConfig.AppConfig,
     private readonly sessions: SessionsService,
+    private readonly conversations: ConversationEngineService,
     private readonly orchestrator: OrchestratorService,
     private readonly tasks: TaskRegistryService,
   ) {}
@@ -79,6 +86,7 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
     client.on('close', () => {
       const context = this.clients.get(client);
       if (context?.sessionId) {
+        this.clearPendingThoughtTimer(context.sessionId);
         try {
           this.sessions.end(context.sessionId);
         } catch {
@@ -158,26 +166,36 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
     event: Extract<ParsedClientEvent, { type: 'text.message' }>,
   ): Promise<void> {
     const sessionId = this.resolveSessionId(client, event);
-    const turnId = this.sessions.beginTextTurn(sessionId);
     const text = event.payload.text.trim();
+    if (!text) {
+      return;
+    }
 
-    this.send(client, {
-      type: 'transcript.final',
-      sessionId,
-      requestId: event.requestId,
-      timestamp: nowIso(),
-      payload: {
-        turnId,
-        text,
-        latencyMs: 0,
-      },
-    });
+    this.clearPendingThoughtTimer(sessionId);
+    const fragmentResult = this.conversations.ingestFragment(sessionId, text);
+    const delayMs = fragmentResult.decision.delayMs ?? 0;
 
-    await this.orchestrator.handleTranscript(
+    if (fragmentResult.decision.action === 'wait') {
+      this.send(client, {
+        type: 'transcript.pending',
+        sessionId,
+        requestId: event.requestId,
+        timestamp: nowIso(),
+        payload: {
+          text: fragmentResult.liveIntent.pendingThought.text,
+          delayMs,
+          reason: fragmentResult.decision.reason,
+        },
+      });
+      this.sendPolicyDecision(client, sessionId, fragmentResult.decision);
+      this.schedulePendingThoughtCommit(client, sessionId, delayMs);
+      return;
+    }
+
+    await this.flushPendingThought(
+      client,
       sessionId,
-      turnId,
-      text,
-      (serverEvent) => this.send(client, serverEvent),
+      fragmentResult.decision.reason,
     );
   }
 
@@ -207,6 +225,7 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
     event: Extract<ParsedClientEvent, { type: 'session.end' }>,
   ): void {
     const sessionId = this.resolveSessionId(client, event);
+    this.clearPendingThoughtTimer(sessionId);
     this.sessions.end(sessionId);
     this.clients.set(client, {});
 
@@ -266,6 +285,95 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     client.send(JSON.stringify(event));
+  }
+
+  private schedulePendingThoughtCommit(
+    client: WebSocket,
+    sessionId: string,
+    delayMs: number,
+  ): void {
+    const safeDelayMs = Math.max(0, delayMs);
+    const timer = setTimeout(() => {
+      void this.flushPendingThought(client, sessionId, 'hold_timeout');
+    }, safeDelayMs);
+    this.pendingThoughtTimers.set(sessionId, timer);
+  }
+
+  private clearPendingThoughtTimer(sessionId: string): void {
+    const timer = this.pendingThoughtTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingThoughtTimers.delete(sessionId);
+    }
+  }
+
+  private async flushPendingThought(
+    client: WebSocket,
+    sessionId: string,
+    reason: string,
+  ): Promise<void> {
+    this.clearPendingThoughtTimer(sessionId);
+
+    let commitResult;
+    try {
+      commitResult = this.conversations.commitPendingThought(sessionId, reason);
+    } catch (error) {
+      this.emitError(client, sessionId, error);
+      return;
+    }
+
+    if (!commitResult) {
+      return;
+    }
+
+    this.sendPolicyDecision(client, sessionId, commitResult.decision);
+
+    if (!commitResult.committedUserText) {
+      return;
+    }
+
+    const turnId = this.sessions.beginTextTurn(sessionId);
+
+    this.send(client, {
+      type: 'transcript.final',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        turnId,
+        text: commitResult.committedUserText,
+        latencyMs: 0,
+      },
+    });
+
+    await this.orchestrator.handleTranscript(
+      sessionId,
+      turnId,
+      commitResult.committedUserText,
+      (serverEvent) => this.send(client, serverEvent),
+    );
+  }
+
+  private sendPolicyDecision(
+    client: WebSocket,
+    sessionId: string,
+    decision: {
+      action: DialogueAction;
+      reason: string;
+      slotKey?: string;
+      shouldReason?: boolean;
+    },
+  ): void {
+    this.send(client, {
+      type: 'policy.decision',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        action: decision.action,
+        reason: decision.reason,
+        slotKey: decision.slotKey,
+        shouldReason: Boolean(decision.shouldReason),
+      },
+    });
   }
 
   private emitError(

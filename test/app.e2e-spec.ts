@@ -96,6 +96,18 @@ describe('Health (e2e)', () => {
       });
   });
 
+  it('/tasks/car_booking_receptionist (GET)', async () => {
+    await request(app.getHttpServer())
+      .get('/tasks/car_booking_receptionist')
+      .expect(200)
+      .expect((response) => {
+        const body = response.body as TaskResponse;
+        expect(body.task.key).toBe('car_booking_receptionist');
+        expect(body.task.name).toBe('Car Booking Receptionist');
+        expect(body.task.systemPrompt).toContain('vehicle service receptionist');
+      });
+  });
+
   afterEach(async () => {
     await app.close();
     rmSync(tempDir, { recursive: true, force: true });

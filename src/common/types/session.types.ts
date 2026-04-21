@@ -1,3 +1,5 @@
+import { SessionConversationState } from './conversation.types';
+
 export type ProcessingState =
   | 'idle'
   | 'listening'
@@ -38,5 +40,6 @@ export interface SessionState {
     updatedAt: string;
   };
   interruptedAssistantTurn?: InterruptedAssistantTurn;
+  conversation?: SessionConversationState;
   metadata?: Record<string, unknown>;
 }

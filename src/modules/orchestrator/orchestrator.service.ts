@@ -1,7 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { DialogueDecision } from '../../common/types/conversation.types';
 import { ServerEvent } from '../../common/types/realtime-events';
 import { elapsedMs, nowIso } from '../../common/utils/timing';
 import { AppError, toErrorPayload } from '../../common/types/errors';
+import { ConversationEngineService } from '../conversation-engine/conversation-engine.service';
 import { ReasoningService } from '../reasoning/reasoning.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { TaskRegistryService } from '../tasks/task-registry.service';
@@ -20,6 +22,7 @@ export class OrchestratorService {
     private readonly tasks: TaskRegistryService,
     private readonly prompts: PromptBuilderService,
     private readonly reasoning: ReasoningService,
+    private readonly conversations: ConversationEngineService,
   ) {}
 
   async handleTranscript(
@@ -51,6 +54,31 @@ export class OrchestratorService {
         return;
       }
 
+      const session = this.sessions.get(sessionId);
+      const task = this.tasks.get(session.taskKey, true);
+      const decision = this.conversations.consumeLastDecision(
+        session,
+        trimmedTranscript,
+      );
+
+      if (decision && decision.shouldReason === false) {
+        this.sessions.appendHistory(sessionId, {
+          role: 'user',
+          text: trimmedTranscript,
+          at: nowIso(),
+          turnId,
+        });
+        this.emitPolicyResponse(
+          sessionId,
+          turnId,
+          task,
+          decision,
+          startedAt,
+          emit,
+        );
+        return;
+      }
+
       this.sessions.setState(sessionId, 'reasoning');
       emit({
         type: 'reasoning.started',
@@ -59,9 +87,9 @@ export class OrchestratorService {
         payload: { turnId },
       });
 
-      const session = this.sessions.get(sessionId);
-      const task = this.tasks.get(session.taskKey, true);
-      const messages = this.prompts.build(session, task, trimmedTranscript);
+      const messages = this.prompts.build(session, task, trimmedTranscript, {
+        decision,
+      });
 
       this.sessions.appendHistory(sessionId, {
         role: 'user',
@@ -232,6 +260,67 @@ export class OrchestratorService {
         latencyMs: elapsedMs(startedAt),
       },
     });
+  }
+
+  private emitPolicyResponse(
+    sessionId: string,
+    turnId: string,
+    task: TaskConfig,
+    decision: DialogueDecision,
+    startedAt: bigint,
+    emit: OrchestratorEmit,
+  ): void {
+    const response = this.normalizeAssistantText(
+      this.resolvePolicyResponseText(decision),
+      task,
+    );
+
+    if (!response) {
+      this.sessions.setState(sessionId, 'idle');
+      return;
+    }
+
+    this.sessions.noteAssistantText(sessionId, turnId, response, true);
+    emit({
+      type: 'assistant.text.chunk',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        turnId,
+        text: response,
+        index: 0,
+        final: true,
+      },
+    });
+    this.emitAssistantText(sessionId, turnId, response, startedAt, emit);
+    this.sessions.appendHistory(sessionId, {
+      role: 'assistant',
+      text: response,
+      at: nowIso(),
+      turnId,
+    });
+    this.sessions.clearInterruptedAssistantTurn(sessionId);
+    this.sessions.setState(sessionId, 'idle');
+    this.logger.log(
+      `policy.response session=${sessionId} turn=${turnId} action=${decision.action} reason=${decision.reason}`,
+    );
+  }
+
+  private resolvePolicyResponseText(decision: DialogueDecision): string {
+    if (decision.responseText?.trim()) {
+      return decision.responseText.trim();
+    }
+
+    switch (decision.action) {
+      case 'ask':
+        return 'What detail would you like to add next?';
+      case 'confirm':
+        return 'Thanks. Let me confirm that.';
+      case 'backchannel':
+        return 'Okay.';
+      default:
+        return 'Okay.';
+    }
   }
 
   private normalizeAssistantText(text: string, task: TaskConfig): string {
