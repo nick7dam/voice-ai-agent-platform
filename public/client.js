@@ -3,6 +3,7 @@ const vadConfig = {
   noiseMultiplier: 3,
   bargeInThresholdMultiplier: 2.4,
   bargeInMinPeakLevel: 0.055,
+  bargeInSpeechScore: 0.58,
   bargeInPreviewHoldMs: 90,
   bargeInHoldMs: 120,
   assistantAudioGraceMs: 1500,
@@ -284,21 +285,87 @@ async function resetTaskConfig() {
   setTaskStatus('Task reset to the built-in default.');
 }
 
-function getAnalyserLevel(analyser) {
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function getAnalyserMetrics(analyser, sampleRate) {
   if (!analyser) {
-    return 0;
+    return { level: 0, speechScore: 0 };
   }
 
-  const samples = new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(samples);
+  const timeDomain = new Uint8Array(analyser.fftSize);
+  const spectrum = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(timeDomain);
+  analyser.getByteFrequencyData(spectrum);
 
   let sum = 0;
-  for (const sample of samples) {
-    const normalized = (sample - 128) / 128;
+  let zeroCrossings = 0;
+  let previous = 0;
+  for (let index = 0; index < timeDomain.length; index += 1) {
+    const normalized = (timeDomain[index] - 128) / 128;
     sum += normalized * normalized;
+    if (index > 0 && Math.sign(normalized) !== Math.sign(previous)) {
+      zeroCrossings += 1;
+    }
+    previous = normalized;
+  }
+  const level = Math.sqrt(sum / timeDomain.length);
+
+  const nyquist = sampleRate / 2;
+  const binHz = nyquist / Math.max(1, spectrum.length);
+  let total = 0;
+  let speech = 0;
+  let high = 0;
+  let weighted = 0;
+
+  for (let index = 0; index < spectrum.length; index += 1) {
+    const energy = spectrum[index] / 255;
+    if (energy <= 0) {
+      continue;
+    }
+
+    const frequency = (index + 0.5) * binHz;
+    total += energy;
+    weighted += energy * frequency;
+
+    if (frequency >= 180 && frequency <= 3400) {
+      speech += energy;
+    } else if (frequency >= 4200) {
+      high += energy;
+    }
   }
 
-  return Math.sqrt(sum / samples.length);
+  if (total <= 0) {
+    return { level, speechScore: 0 };
+  }
+
+  const centroid = weighted / total;
+  const speechRatio = speech / total;
+  const highRatio = high / total;
+  const zcr = zeroCrossings / Math.max(1, timeDomain.length - 1);
+  const centroidScore =
+    centroid < 180
+      ? clamp01(centroid / 180)
+      : centroid <= 2600
+        ? 1
+        : clamp01(1 - (centroid - 2600) / 2600);
+  const speechRatioScore = clamp01((speechRatio - 0.28) / 0.35);
+  const highRatioScore = clamp01((0.24 - highRatio) / 0.24);
+  const zcrScore =
+    zcr < 0.015
+      ? clamp01(zcr / 0.015)
+      : zcr <= 0.22
+        ? 1
+        : clamp01(1 - (zcr - 0.22) / 0.22);
+  const speechScore = clamp01(
+    centroidScore * 0.3 +
+      speechRatioScore * 0.35 +
+      highRatioScore * 0.2 +
+      zcrScore * 0.15,
+  );
+
+  return { level, speechScore };
 }
 
 function updateMicMeter(level) {
@@ -349,10 +416,11 @@ function hasInterruptibleAssistantOutput() {
   );
 }
 
-function isLikelyBargeIn(level, threshold) {
+function isLikelyBargeIn(level, threshold, speechScore) {
   return (
     level >= vadConfig.bargeInMinPeakLevel &&
-    level >= threshold * vadConfig.bargeInThresholdMultiplier
+    level >= threshold * vadConfig.bargeInThresholdMultiplier &&
+    speechScore >= vadConfig.bargeInSpeechScore
   );
 }
 
@@ -461,7 +529,11 @@ function runWebRtcBargeInLoop() {
     return;
   }
 
-  const level = getAnalyserLevel(state.webrtcBargeInAnalyser);
+  const metrics = getAnalyserMetrics(
+    state.webrtcBargeInAnalyser,
+    state.webrtcBargeInContext?.sampleRate || 48000,
+  );
+  const level = metrics.level;
   const now = performance.now();
   const deltaMs = state.webrtcBargeInLastAt
     ? Math.min(100, Math.max(0, now - state.webrtcBargeInLastAt))
@@ -480,7 +552,7 @@ function runWebRtcBargeInLoop() {
     return;
   }
 
-  if (isLikelyBargeIn(level, threshold)) {
+  if (isLikelyBargeIn(level, threshold, metrics.speechScore)) {
     state.webrtcBargeInCandidateMs += deltaMs;
 
     if (
@@ -512,6 +584,7 @@ async function startWebRtcBargeInMonitor(localStream) {
   const source = context.createMediaStreamSource(localStream);
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.15;
   source.connect(analyser);
 
   state.webrtcBargeInContext = context;
@@ -714,6 +787,27 @@ function getWebRtcErrorMessage(error, fallback) {
   return error.message || fallback;
 }
 
+function buildMicrophoneConstraints() {
+  const supported =
+    navigator.mediaDevices?.getSupportedConstraints?.() || {};
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    channelCount: 1,
+  };
+
+  if (supported.voiceIsolation) {
+    audio.voiceIsolation = true;
+  }
+
+  if (supported.sampleRate) {
+    audio.sampleRate = 48000;
+  }
+
+  return audio;
+}
+
 function waitForIceGatheringComplete(peerConnection) {
   if (peerConnection.iceGatheringState === 'complete') {
     return Promise.resolve();
@@ -852,12 +946,7 @@ async function startWebRtcVoice() {
   try {
     logWebRtcSetup('microphone.requested');
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
+      audio: buildMicrophoneConstraints(),
     });
   } catch (error) {
     throw new Error(

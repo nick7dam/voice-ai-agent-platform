@@ -5,6 +5,7 @@ faster-whisper==1.2.1
 ctranslate2>=4.7.0,<5
 torch>=2.6,<3
 torchaudio>=2.6,<3
+silero-vad>=5,<6
 qwen-tts==0.1.1
 faster-qwen3-tts==0.2.4
 numpy>=1.24.0,<2

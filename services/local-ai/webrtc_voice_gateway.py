@@ -124,6 +124,24 @@ BARGE_THRESHOLD_MULTIPLIER = float(
 BARGE_HOLD_MS = int(os.getenv("VOICE_VAD_BARGE_HOLD_MS", "140"))
 BARGE_START_GRACE_MS = int(os.getenv("VOICE_VAD_BARGE_START_GRACE_MS", "350"))
 BARGE_PREROLL_MS = int(os.getenv("VOICE_VAD_BARGE_PREROLL_MS", "140"))
+VAD_CLASSIFIER = os.getenv("VOICE_VAD_CLASSIFIER", "silero_hybrid").strip().lower()
+VAD_MODEL_DEVICE = os.getenv("VOICE_VAD_MODEL_DEVICE", "cpu").strip().lower()
+VAD_MODEL_PRELOAD = env_bool("VOICE_VAD_MODEL_PRELOAD", True)
+VAD_MODEL_WINDOW_SAMPLES = max(
+    256, int(os.getenv("VOICE_VAD_MODEL_WINDOW_SAMPLES", "512"))
+)
+VAD_MODEL_HYBRID_WEIGHT = float(
+    os.getenv("VOICE_VAD_MODEL_HYBRID_WEIGHT", "0.72")
+)
+SPEECH_LIKELIHOOD_THRESHOLD = float(
+    os.getenv("VOICE_VAD_SPEECH_LIKELIHOOD_THRESHOLD", "0.42")
+)
+BARGE_SPEECH_LIKELIHOOD_THRESHOLD = float(
+    os.getenv("VOICE_VAD_BARGE_SPEECH_LIKELIHOOD_THRESHOLD", "0.68")
+)
+BARGE_MIN_SPEECH_LIKE_MS = int(
+    os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_LIKE_MS", "180")
+)
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 TRANSCRIPT_COALESCING_ENABLED = env_bool("VOICE_TRANSCRIPT_COALESCING_ENABLED", True)
 TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "650"))
@@ -307,6 +325,22 @@ def resolve_tts_device() -> str:
         raise RuntimeError("LOCAL_TTS_DEVICE must be one of: auto, cpu, cuda, mps")
 
     return TTS_DEVICE
+
+
+def resolve_vad_model_device() -> str:
+    if VAD_MODEL_DEVICE == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    if VAD_MODEL_DEVICE not in {"cpu", "cuda", "mps"}:
+        raise RuntimeError(
+            "VOICE_VAD_MODEL_DEVICE must be one of: auto, cpu, cuda, mps"
+        )
+
+    return VAD_MODEL_DEVICE
 
 
 def call_with_supported_kwargs(fn: Any, **kwargs: Any) -> Any:
@@ -889,7 +923,11 @@ class VadTurn:
     last_voice_at: float = 0.0
     threshold_at_start: float = 0.0
     speech_ms: float = 0.0
+    speech_like_ms: float = 0.0
     max_level: float = 0.0
+    max_speech_likelihood: float = 0.0
+    speech_likelihood_total: float = 0.0
+    speech_likelihood_frames: int = 0
     started_during_assistant: bool = False
 
     @property
@@ -1028,6 +1066,153 @@ def join_transcript_fragments(parts: List[str]) -> str:
     return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
 
 
+def clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def estimate_speech_likelihood(samples: np.ndarray) -> float:
+    if samples.size == 0:
+        return 0.0
+
+    clipped = np.clip(samples.astype(np.float32, copy=False), -1.0, 1.0)
+    rms = float(np.sqrt(np.mean(np.square(clipped))))
+    if rms < 0.004:
+        return 0.0
+
+    window = np.hanning(clipped.size).astype(np.float32, copy=False)
+    spectrum = np.fft.rfft(clipped * window)
+    power = np.abs(spectrum) ** 2
+    total_power = float(np.sum(power))
+    if total_power <= 1e-9:
+        return 0.0
+
+    freqs = np.fft.rfftfreq(clipped.size, d=1 / INPUT_SAMPLE_RATE)
+    speech_band = (freqs >= 180) & (freqs <= 3800)
+    high_band = freqs >= 5000
+
+    speech_band_ratio = float(np.sum(power[speech_band]) / total_power)
+    high_band_ratio = float(np.sum(power[high_band]) / total_power)
+    spectral_centroid = float(np.sum(freqs * power) / total_power)
+    centroid_score = 1.0 - min(abs(spectral_centroid - 1600.0) / 2600.0, 1.0)
+
+    signs = np.signbit(clipped)
+    zero_crossings = float(np.mean(signs[1:] != signs[:-1])) if clipped.size > 1 else 0.0
+    zcr_score = 1.0 - min(abs(zero_crossings - 0.09) / 0.11, 1.0)
+
+    energy_score = clamp01((rms - 0.01) / 0.06)
+    speech_band_score = clamp01((speech_band_ratio - 0.35) / 0.45)
+    high_band_penalty = clamp01(high_band_ratio / 0.2)
+
+    likelihood = (
+        energy_score * 0.18
+        + speech_band_score * 0.42
+        + clamp01(centroid_score) * 0.24
+        + clamp01(zcr_score) * 0.16
+        - high_band_penalty * 0.22
+    )
+    return clamp01(likelihood)
+
+
+class SileroSpeechGate:
+    def __init__(self):
+        self.enabled = VAD_CLASSIFIER in {"silero", "silero_hybrid"}
+        self.device = resolve_vad_model_device()
+        self.window_samples = VAD_MODEL_WINDOW_SAMPLES
+        self.model: Optional[Any] = None
+        self.buffer = np.zeros(0, dtype=np.float32)
+        self.warned_unavailable = False
+
+    def ensure_model(self) -> Optional[Any]:
+        if not self.enabled:
+            return None
+
+        if self.model is not None:
+            return self.model
+
+        started_at = time.perf_counter()
+
+        try:
+            from silero_vad import load_silero_vad
+        except Exception as exc:
+            if not self.warned_unavailable:
+                logger.warning(
+                    "voice.vad.model.unavailable provider=silero error=%s",
+                    exc,
+                )
+                self.warned_unavailable = True
+            return None
+
+        try:
+            model = call_with_supported_kwargs(load_silero_vad, onnx=False)
+            if hasattr(model, "to"):
+                model = model.to(self.device)
+            if hasattr(model, "eval"):
+                model.eval()
+            if hasattr(model, "reset_states"):
+                model.reset_states()
+            self.model = model
+            logger.info(
+                "voice.vad.model.loaded provider=silero device=%s latencyMs=%d",
+                self.device,
+                elapsed_ms(started_at),
+            )
+            return self.model
+        except Exception as exc:
+            if not self.warned_unavailable:
+                logger.warning(
+                    "voice.vad.model.load_failed provider=silero device=%s error=%s",
+                    self.device,
+                    exc,
+                )
+                self.warned_unavailable = True
+            return None
+
+    def score(self, samples: np.ndarray) -> Optional[float]:
+        model = self.ensure_model()
+        if model is None or samples.size == 0:
+            return None
+
+        combined = (
+            np.concatenate([self.buffer, samples]).astype(np.float32, copy=False)
+            if self.buffer.size
+            else samples.astype(np.float32, copy=False)
+        )
+        probabilities: list[float] = []
+
+        while combined.size >= self.window_samples:
+            window = combined[: self.window_samples]
+            combined = combined[self.window_samples :]
+            probability = self._infer_probability(model, window)
+            if probability is not None:
+                probabilities.append(probability)
+
+        self.buffer = combined
+        if not probabilities:
+            return None
+
+        return float(max(probabilities))
+
+    def _infer_probability(self, model: Any, samples: np.ndarray) -> Optional[float]:
+        tensor = torch.from_numpy(samples.astype(np.float32, copy=False))
+
+        if self.device != "cpu":
+            tensor = tensor.to(self.device, non_blocking=True)
+
+        with torch.no_grad():
+            try:
+                result = model(tensor, INPUT_SAMPLE_RATE)
+            except Exception:
+                result = model(tensor.unsqueeze(0), INPUT_SAMPLE_RATE)
+
+        if isinstance(result, torch.Tensor):
+            return float(result.detach().reshape(-1)[0].to("cpu").item())
+
+        try:
+            return float(np.asarray(result).reshape(-1)[0])
+        except Exception:
+            return None
+
+
 class VoiceActivityDetector:
     def __init__(self, session: "VoiceSession"):
         self.session = session
@@ -1035,9 +1220,30 @@ class VoiceActivityDetector:
         self.current_turn: Optional[VadTurn] = None
         self.preroll: list[Tuple[float, np.ndarray]] = []
         self.barge_candidate_ms = 0.0
+        self.speech_gate = SileroSpeechGate()
 
     def threshold(self) -> float:
         return max(MIN_SPEECH_THRESHOLD, self.noise_floor * NOISE_MULTIPLIER)
+
+    def required_speech_likelihood(self, barge_in: bool) -> float:
+        return (
+            BARGE_SPEECH_LIKELIHOOD_THRESHOLD
+            if barge_in
+            else SPEECH_LIKELIHOOD_THRESHOLD
+        )
+
+    def score_speech_likelihood(self, samples: np.ndarray) -> float:
+        heuristic_score = estimate_speech_likelihood(samples)
+        model_score = self.speech_gate.score(samples)
+
+        if model_score is None:
+            return heuristic_score
+
+        if VAD_CLASSIFIER == "silero":
+            return clamp01(model_score)
+
+        hybrid_weight = clamp01(VAD_MODEL_HYBRID_WEIGHT)
+        return clamp01(model_score * hybrid_weight + heuristic_score * (1 - hybrid_weight))
 
     async def process(self, samples: np.ndarray) -> None:
         if samples.size == 0:
@@ -1046,11 +1252,12 @@ class VoiceActivityDetector:
         now = time.monotonic()
         duration_ms = samples.size / INPUT_SAMPLE_RATE * 1000
         level = float(np.sqrt(np.mean(np.square(samples))))
+        speech_likelihood = self.score_speech_likelihood(samples)
         threshold = self.threshold()
         self.update_preroll(now, samples)
 
         if self.current_turn is None:
-            if self.should_start(level, threshold, duration_ms):
+            if self.should_start(level, threshold, speech_likelihood, duration_ms):
                 await self.start_turn(now, threshold)
             else:
                 self.update_noise(level, threshold)
@@ -1062,11 +1269,23 @@ class VoiceActivityDetector:
         turn = self.current_turn
         turn.chunks.append(samples)
         turn.max_level = max(turn.max_level, level)
+        turn.max_speech_likelihood = max(
+            turn.max_speech_likelihood, speech_likelihood
+        )
+        turn.speech_likelihood_total += speech_likelihood
+        turn.speech_likelihood_frames += 1
 
         peak_threshold = turn.max_level * END_THRESHOLD_PEAK_RATIO
-        if level >= max(threshold, peak_threshold):
+        speech_threshold = self.required_speech_likelihood(
+            turn.started_during_assistant
+        )
+        if (
+            level >= max(threshold, peak_threshold)
+            and speech_likelihood >= speech_threshold
+        ):
             turn.last_voice_at = now
             turn.speech_ms += duration_ms
+            turn.speech_like_ms += duration_ms
 
         utterance_ms = (now - turn.started_at) * 1000
         silence_ms = (now - turn.last_voice_at) * 1000
@@ -1093,10 +1312,19 @@ class VoiceActivityDetector:
             return chunks[:-1]
         return []
 
-    def should_start(self, level: float, threshold: float, duration_ms: float) -> bool:
+    def should_start(
+        self,
+        level: float,
+        threshold: float,
+        speech_likelihood: float,
+        duration_ms: float,
+    ) -> bool:
         if not self.session.is_assistant_interruptible():
             self.barge_candidate_ms = 0
-            return level >= threshold
+            return (
+                level >= threshold
+                and speech_likelihood >= self.required_speech_likelihood(False)
+            )
 
         grace_active = self.session.is_in_assistant_barge_grace()
         barge_threshold = max(
@@ -1107,7 +1335,11 @@ class VoiceActivityDetector:
         if grace_active:
             barge_threshold = max(barge_threshold, BARGE_MIN_PEAK_LEVEL * 1.25)
 
-        if level < barge_threshold:
+        if (
+            level < barge_threshold
+            or speech_likelihood
+            < self.required_speech_likelihood(True)
+        ):
             self.barge_candidate_ms = 0
             return False
 
@@ -1154,11 +1386,25 @@ class VoiceActivityDetector:
             turn.threshold_at_start * 1.15,
         )
         min_audio_ms = MIN_BARGE_AUDIO_MS if turn.started_during_assistant else 180
+        min_speech_like_ms = (
+            BARGE_MIN_SPEECH_LIKE_MS if turn.started_during_assistant else min_speech
+        )
+        required_speech_likelihood = self.required_speech_likelihood(
+            turn.started_during_assistant
+        )
+        average_speech_likelihood = (
+            turn.speech_likelihood_total / turn.speech_likelihood_frames
+            if turn.speech_likelihood_frames
+            else 0.0
+        )
         samples = turn.samples
         accepted = (
             samples.size >= int(INPUT_SAMPLE_RATE * min_audio_ms / 1000)
             and turn.speech_ms >= min_speech
+            and turn.speech_like_ms >= min_speech_like_ms
             and turn.max_level >= required_peak
+            and turn.max_speech_likelihood >= required_speech_likelihood
+            and average_speech_likelihood >= required_speech_likelihood * 0.78
         )
 
         if not accepted:
@@ -1168,8 +1414,16 @@ class VoiceActivityDetector:
                     "timestamp": now_iso(),
                     "payload": {
                         "speechMs": round(turn.speech_ms),
+                        "speechLikeMs": round(turn.speech_like_ms),
                         "maxLevel": round(turn.max_level, 4),
                         "requiredPeak": round(required_peak, 4),
+                        "maxSpeechLikelihood": round(turn.max_speech_likelihood, 4),
+                        "averageSpeechLikelihood": round(
+                            average_speech_likelihood, 4
+                        ),
+                        "requiredSpeechLikelihood": round(
+                            required_speech_likelihood, 4
+                        ),
                     },
                 }
             )
@@ -2215,6 +2469,26 @@ def preload_stt_model() -> None:
     logger.info("voice.stt.preload.end latencyMs=%d", elapsed_ms(started_at))
 
 
+def preload_vad_model() -> None:
+    if VAD_CLASSIFIER not in {"silero", "silero_hybrid"}:
+        return
+
+    started_at = time.perf_counter()
+    gate = SileroSpeechGate()
+    model = gate.ensure_model()
+    if model is None:
+        logger.info("voice.vad.preload.skipped classifier=%s", VAD_CLASSIFIER)
+        return
+
+    gate.score(np.zeros(gate.window_samples, dtype=np.float32))
+    logger.info(
+        "voice.vad.preload.end classifier=%s device=%s latencyMs=%d",
+        VAD_CLASSIFIER,
+        gate.device,
+        elapsed_ms(started_at),
+    )
+
+
 def preload_tts_model() -> None:
     if not TTS_ENABLED:
         return
@@ -2241,6 +2515,8 @@ async def preload_models() -> None:
     try:
         if STT_PRELOAD:
             await asyncio.to_thread(preload_stt_model)
+        if VAD_MODEL_PRELOAD:
+            await asyncio.to_thread(preload_vad_model)
         if TTS_PRELOAD:
             await asyncio.to_thread(preload_tts_model)
     except Exception as exc:
@@ -2250,12 +2526,14 @@ async def preload_models() -> None:
 async def main() -> None:
     ice_servers = browser_ice_servers()
     logger.info(
-        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
+        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s vadClassifier=%s vadDevice=%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
         HOST,
         PORT,
         NEST_WS_URL,
         STT_MODEL_NAME,
         STT_DEVICE,
+        VAD_CLASSIFIER,
+        resolve_vad_model_device(),
         TTS_PROVIDER,
         QWEN_TTS_MODEL_NAME,
         resolve_tts_device(),
@@ -2271,7 +2549,7 @@ async def main() -> None:
         TTS_MAX_SPOKEN_CHARS_PER_TURN,
     )
 
-    should_preload = STT_PRELOAD or TTS_PRELOAD
+    should_preload = STT_PRELOAD or VAD_MODEL_PRELOAD or TTS_PRELOAD
     if should_preload and GATEWAY_BLOCKING_PRELOAD:
         logger.info("voice.preload.blocking.start")
         await preload_models()
