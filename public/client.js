@@ -48,7 +48,8 @@ const el = {
   behaviorGuidelines: document.querySelector('#behaviorGuidelines'),
   allowedTools: document.querySelector('#allowedTools'),
   responseStyle: document.querySelector('#responseStyle'),
-  maxResponseChars: document.querySelector('#maxResponseChars'),
+  responseLengthMode: document.querySelector('#responseLengthMode'),
+  hardMaxResponseChars: document.querySelector('#hardMaxResponseChars'),
   memoryEnabled: document.querySelector('#memoryEnabled'),
   maxFactsInPrompt: document.querySelector('#maxFactsInPrompt'),
   memoryWritePolicy: document.querySelector('#memoryWritePolicy'),
@@ -186,7 +187,10 @@ function populateTaskForm(task) {
   el.behaviorGuidelines.value = linesToText(task.behaviorGuidelines);
   el.allowedTools.value = linesToText(task.allowedTools);
   el.responseStyle.value = task.responsePolicy.style;
-  el.maxResponseChars.value = String(task.responsePolicy.maxResponseChars);
+  el.responseLengthMode.value = task.responsePolicy.responseLengthMode ?? 'short';
+  el.hardMaxResponseChars.value = task.responsePolicy.hardMaxResponseChars
+    ?? task.responsePolicy.maxResponseChars
+    ?? '';
   el.memoryEnabled.checked = task.memoryPolicy.enabled;
   el.maxFactsInPrompt.value = String(task.memoryPolicy.maxFactsInPrompt);
   el.memoryWritePolicy.value = task.memoryPolicy.writePolicy;
@@ -201,7 +205,10 @@ function readTaskForm() {
     allowedTools: textToList(el.allowedTools.value),
     responsePolicy: {
       style: el.responseStyle.value.trim(),
-      maxResponseChars: Number(el.maxResponseChars.value),
+      responseLengthMode: el.responseLengthMode.value,
+      hardMaxResponseChars: el.hardMaxResponseChars.value
+        ? Number(el.hardMaxResponseChars.value)
+        : null,
       plainTextOnly: true,
     },
     memoryPolicy: {

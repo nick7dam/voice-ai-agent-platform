@@ -47,7 +47,6 @@ NEST_WS_URL=ws://127.0.0.1:3000/realtime
 
 ```bash
 LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
-LOCAL_TTS_ENGINE=qwen3_tts
 LOCAL_QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 LOCAL_QWEN_TTS_SPEAKER=aiden
 LOCAL_QWEN_TTS_STREAM_CHUNK_SIZE=4

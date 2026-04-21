@@ -186,7 +186,7 @@ export class RealtimeGatewayService implements OnModuleInit, OnModuleDestroy {
     event: Extract<ParsedClientEvent, { type: 'session.interrupt' }>,
   ): void {
     const sessionId = this.resolveSessionId(client, event);
-    this.sessions.interrupt(sessionId);
+    this.sessions.interrupt(sessionId, event.payload?.reason);
     this.logger.log(
       `session.interrupt session=${sessionId} reason=${event.payload?.reason ?? 'unspecified'}`,
     );

@@ -46,7 +46,7 @@ STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 STT_PRELOAD = env_bool("LOCAL_STT_PRELOAD", False)
 
-TTS_ENGINE = os.getenv("LOCAL_TTS_ENGINE", "qwen3_tts").strip().lower()
+TTS_PROVIDER = "qwen3_tts"
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
 TTS_SAMPLE_RATE = int(os.getenv("LOCAL_TTS_SAMPLE_RATE", "24000"))
 TTS_PRELOAD = env_bool("LOCAL_TTS_PRELOAD", False)
@@ -61,23 +61,6 @@ CALL_END_MARKER = "[[END_CALL]]"
 CALL_END_AUDIO_TAIL_MS = int(os.getenv("VOICE_CALL_END_AUDIO_TAIL_MS", "650"))
 OUTPUT_DRAIN_POLL_MS = int(os.getenv("VOICE_OUTPUT_DRAIN_POLL_MS", "50"))
 OUTPUT_DRAIN_MAX_MS = int(os.getenv("VOICE_OUTPUT_DRAIN_MAX_MS", "30000"))
-
-CHATTERBOX_MODEL_NAME = os.getenv(
-    "LOCAL_CHATTERBOX_MODEL", "ResembleAI/chatterbox-turbo"
-)
-CHATTERBOX_AUDIO_PROMPT_PATH = os.getenv(
-    "LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH", ""
-).strip()
-CHATTERBOX_EMOTION_TAGS = env_bool("LOCAL_CHATTERBOX_EMOTION_TAGS", True)
-CHATTERBOX_TEMPERATURE = float(os.getenv("LOCAL_CHATTERBOX_TEMPERATURE", "0.8"))
-CHATTERBOX_TOP_P = float(os.getenv("LOCAL_CHATTERBOX_TOP_P", "0.95"))
-CHATTERBOX_TOP_K = int(os.getenv("LOCAL_CHATTERBOX_TOP_K", "1000"))
-CHATTERBOX_REPETITION_PENALTY = float(
-    os.getenv("LOCAL_CHATTERBOX_REPETITION_PENALTY", "1.2")
-)
-CHATTERBOX_EXAGGERATION = float(os.getenv("LOCAL_CHATTERBOX_EXAGGERATION", "0.5"))
-CHATTERBOX_NORM_LOUDNESS = env_bool("LOCAL_CHATTERBOX_NORM_LOUDNESS", True)
-CHATTERBOX_PROGRESS = env_bool("LOCAL_CHATTERBOX_PROGRESS", False)
 
 QWEN_TTS_MODEL_NAME = os.getenv(
     "LOCAL_QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
@@ -168,7 +151,6 @@ logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[WhisperModel] = None
-chatterbox_model: Optional[Any] = None
 qwen_tts_model: Optional[Any] = None
 
 
@@ -325,14 +307,6 @@ def resolve_tts_device() -> str:
     return TTS_DEVICE
 
 
-def active_tts_model_name() -> str:
-    if TTS_ENGINE == "qwen3_tts":
-        return QWEN_TTS_MODEL_NAME
-    if TTS_ENGINE == "chatterbox_turbo":
-        return CHATTERBOX_MODEL_NAME
-    return "unknown"
-
-
 def call_with_supported_kwargs(fn: Any, **kwargs: Any) -> Any:
     signature = inspect.signature(fn)
     accepts_kwargs = any(
@@ -354,117 +328,6 @@ def call_with_supported_kwargs(fn: Any, **kwargs: Any) -> Any:
     return fn(**filtered)
 
 
-def ensure_perth_watermarker() -> None:
-    try:
-        import perth
-    except ImportError as exc:
-        raise RuntimeError(
-            "Chatterbox requires resemble-perth. Install it with "
-            "`pip install resemble-perth` in the Chatterbox voice environment."
-        ) from exc
-
-    if callable(getattr(perth, "PerthImplicitWatermarker", None)):
-        return
-
-    try:
-        from perth.perth_net.perth_net_implicit.perth_watermarker import (
-            PerthImplicitWatermarker,
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            "resemble-perth is installed, but the real "
-            "PerthImplicitWatermarker implementation could not be imported."
-        ) from exc
-
-    perth.PerthImplicitWatermarker = PerthImplicitWatermarker
-    logger.info("voice.tts.chatterbox.perth_patched")
-
-
-def disable_chatterbox_progress_bars() -> None:
-    if CHATTERBOX_PROGRESS:
-        return
-
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TQDM_DISABLE", "1")
-
-    try:
-        import tqdm
-        import tqdm.auto
-        import tqdm.std
-    except ImportError:
-        return
-
-    base_tqdm = tqdm.std.tqdm
-
-    class SilentTqdm(base_tqdm):
-        def __init__(self, *args: Any, **kwargs: Any):
-            kwargs["disable"] = True
-            super().__init__(*args, **kwargs)
-
-    tqdm.tqdm = SilentTqdm
-    tqdm.auto.tqdm = SilentTqdm
-    tqdm.std.tqdm = SilentTqdm
-
-
-def get_chatterbox_model() -> Any:
-    global chatterbox_model
-
-    if chatterbox_model is not None:
-        return chatterbox_model
-
-    disable_chatterbox_progress_bars()
-
-    try:
-        from chatterbox.tts_turbo import ChatterboxTurboTTS
-    except ImportError as exc:
-        raise RuntimeError(
-            "Chatterbox Turbo is not installed. Install "
-            "services/local-ai/requirements-voice.txt in the voice "
-            "gateway environment."
-        ) from exc
-
-    started_at = time.perf_counter()
-    logger.info(
-        "voice.tts.chatterbox.load.start model=%s device=%s audioPrompt=%s",
-        CHATTERBOX_MODEL_NAME,
-        resolve_tts_device(),
-        bool(CHATTERBOX_AUDIO_PROMPT_PATH),
-    )
-    ensure_perth_watermarker()
-    model = ChatterboxTurboTTS.from_pretrained(device=resolve_tts_device())
-    audio_prompt = CHATTERBOX_AUDIO_PROMPT_PATH
-
-    if audio_prompt:
-        prompt_path = Path(audio_prompt).expanduser()
-        if not prompt_path.exists():
-            raise RuntimeError(
-                f"LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH does not exist: {prompt_path}"
-            )
-
-        model.prepare_conditionals(
-            str(prompt_path),
-            exaggeration=CHATTERBOX_EXAGGERATION,
-            norm_loudness=CHATTERBOX_NORM_LOUDNESS,
-        )
-        audio_prompt = str(prompt_path)
-    elif getattr(model, "conds", None) is None:
-        logger.warning(
-            "voice.tts.chatterbox.no_conditionals "
-            "set LOCAL_CHATTERBOX_AUDIO_PROMPT_PATH to a 5-10s WAV reference clip"
-        )
-
-    chatterbox_model = model
-    logger.info(
-        "voice.tts.loaded engine=chatterbox_turbo model=%s device=%s sampleRate=%s audioPrompt=%s latencyMs=%d",
-        CHATTERBOX_MODEL_NAME,
-        resolve_tts_device(),
-        getattr(model, "sr", TTS_SAMPLE_RATE),
-        bool(audio_prompt),
-        elapsed_ms(started_at),
-    )
-    return chatterbox_model
-
-
 def resolve_qwen_tts_dtype() -> torch.dtype:
     if QWEN_TTS_DTYPE in {"bf16", "bfloat16"}:
         return torch.bfloat16
@@ -482,8 +345,7 @@ def resolve_qwen_tts_device() -> str:
     if device == "cuda":
         return "cuda"
     raise RuntimeError(
-        "The streaming Qwen3-TTS engine requires CUDA. "
-        "Set LOCAL_TTS_DEVICE=cuda or use LOCAL_TTS_ENGINE=chatterbox_turbo."
+        "The Qwen3-TTS path requires CUDA. Set LOCAL_TTS_DEVICE=cuda."
     )
 
 
@@ -626,32 +488,7 @@ def strip_tts_asides(text: str) -> str:
 
 
 def prepare_text_for_tts_engine(text: str) -> str:
-    text = normalize_text_for_speech(text)
-    if TTS_ENGINE == "chatterbox_turbo":
-        return decorate_text_for_chatterbox(text)
-    return text
-
-
-def decorate_text_for_chatterbox(text: str) -> str:
-    if not CHATTERBOX_EMOTION_TAGS or not text:
-        return text
-
-    if re.search(r"\[(?:laugh|chuckle|cough|sigh|gasp)\]", text, re.IGNORECASE):
-        return text
-
-    # Keep emotion cues conservative for a service receptionist. The visible chat
-    # remains plain text; this hidden TTS-only layer gives Chatterbox a subtle cue
-    # when the caller corrects themselves or the assistant acknowledges a repair.
-    if re.match(r"^(oh|ah),?\s+i see\b", text, flags=re.IGNORECASE):
-        return re.sub(
-            r"^((?:oh|ah),?\s+i see(?: what you meant)?)\b",
-            lambda match: f"{match.group(1)} [chuckle]",
-            text,
-            count=1,
-            flags=re.IGNORECASE,
-        )
-
-    return text
+    return normalize_text_for_speech(text)
 
 
 def split_text_for_tts_queue(text: str, first_phrase: bool) -> List[str]:
@@ -889,41 +726,6 @@ def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
         temp_path.unlink(missing_ok=True)
 
 
-def iter_chatterbox_tts_audio(speech_text: str):
-    model = get_chatterbox_model()
-    started_at = time.perf_counter()
-    logger.info(
-        "voice.tts.chatterbox.generate.start chars=%d temperature=%.2f topP=%.2f topK=%d",
-        len(speech_text),
-        CHATTERBOX_TEMPERATURE,
-        CHATTERBOX_TOP_P,
-        CHATTERBOX_TOP_K,
-    )
-    with torch.inference_mode():
-        audio = model.generate(
-            speech_text,
-            repetition_penalty=CHATTERBOX_REPETITION_PENALTY,
-            top_p=CHATTERBOX_TOP_P,
-            top_k=CHATTERBOX_TOP_K,
-            temperature=CHATTERBOX_TEMPERATURE,
-        )
-    audio_array = audio_to_float32(audio)
-    audio_array = resample_float32(
-        audio_array,
-        int(getattr(model, "sr", TTS_SAMPLE_RATE)),
-        TTS_SAMPLE_RATE,
-    )
-    audio_array = trim_generated_silence(audio_array, TTS_SAMPLE_RATE)
-    logger.info(
-        "voice.tts.chatterbox.generate.end chars=%d samples=%d audioSeconds=%.2f latencyMs=%d",
-        len(speech_text),
-        int(audio_array.size),
-        audio_array.size / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
-        elapsed_ms(started_at),
-    )
-    yield audio_array
-
-
 def iter_qwen_tts_audio(speech_text: str):
     model = get_qwen_tts_model()
     started_at = time.perf_counter()
@@ -994,17 +796,7 @@ def iter_tts_audio(text: str):
     if not speech_text:
         return
 
-    if TTS_ENGINE == "qwen3_tts":
-        yield from iter_qwen_tts_audio(speech_text)
-        return
-
-    if TTS_ENGINE == "chatterbox_turbo":
-        yield from iter_chatterbox_tts_audio(speech_text)
-        return
-
-    raise RuntimeError(
-        "LOCAL_TTS_ENGINE must be one of: qwen3_tts, chatterbox_turbo"
-    )
+    yield from iter_qwen_tts_audio(speech_text)
 
 
 class PcmOutputTrack(MediaStreamTrack):
@@ -2145,7 +1937,7 @@ class VoiceSession:
             logger.info(
                 "voice.tts.queue turn=%s engine=%s phrases=%d chars=%d totalTurnChars=%d",
                 turn_id,
-                TTS_ENGINE,
+                TTS_PROVIDER,
                 queued,
                 queued_chars,
                 self.spoken_chars_by_turn.get(turn_id, 0),
@@ -2412,7 +2204,7 @@ def preload_tts_model() -> None:
 
     logger.info(
         "voice.tts.preload.end engine=%s chars=%d chunks=%d audioSeconds=%.2f latencyMs=%d",
-        TTS_ENGINE,
+        TTS_PROVIDER,
         len(text),
         chunks,
         samples / TTS_SAMPLE_RATE if TTS_SAMPLE_RATE else 0,
@@ -2439,8 +2231,8 @@ async def main() -> None:
         NEST_WS_URL,
         STT_MODEL_NAME,
         STT_DEVICE,
-        TTS_ENGINE,
-        active_tts_model_name(),
+        TTS_PROVIDER,
+        QWEN_TTS_MODEL_NAME,
         resolve_tts_device(),
         TTS_SAMPLE_RATE,
         len(ice_servers),

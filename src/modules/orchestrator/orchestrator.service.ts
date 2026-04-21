@@ -67,6 +67,7 @@ export class OrchestratorService {
         role: 'user',
         text: trimmedTranscript,
         at: nowIso(),
+        turnId,
       });
 
       this.logger.log(`reasoning.start session=${sessionId} turn=${turnId}`);
@@ -99,6 +100,8 @@ export class OrchestratorService {
         if (!speech) {
           return;
         }
+
+        this.sessions.noteAssistantText(sessionId, turnId, speech, final);
 
         emit({
           type: 'assistant.text.chunk',
@@ -152,10 +155,8 @@ export class OrchestratorService {
 
       ensureTurnCurrent();
 
-      /*const shouldEndCall =
-        this.shouldEndCall(result.text) ||
-        this.isCallEndingUserText(trimmedTranscript);*/
       const safeText = this.normalizeAssistantText(result.text, task);
+      this.sessions.noteAssistantText(sessionId, turnId, safeText, true);
       const finalSpeechChunks = this.extractSpeechChunks(
         safeText,
         speechCursor,
@@ -172,20 +173,10 @@ export class OrchestratorService {
         role: 'assistant',
         text: safeText,
         at: nowIso(),
+        turnId,
       });
+      this.sessions.clearInterruptedAssistantTurn(sessionId);
       this.sessions.setState(sessionId, 'idle');
-
-      /*if (shouldEndCall) {
-        emit({
-          type: 'session.end_requested',
-          sessionId,
-          timestamp: nowIso(),
-          payload: {
-            turnId,
-            reason: 'assistant_completed_call',
-          },
-        });
-      }*/
 
       this.logger.log(
         `reasoning.end session=${sessionId} turn=${turnId} latencyMs=${elapsedMs(startedAt)} providerLatencyMs=${result.latencyMs}`,
@@ -249,19 +240,9 @@ export class OrchestratorService {
       this.sanitizeAssistantPlainText(
         (text || fallback).replaceAll(this.callEndMarker, ''),
       ) || fallback;
-    return this.limitResponseForPhoneCall(
+    return this.limitResponseLength(
       compact,
-      task.responsePolicy.maxResponseChars,
-    );
-  }
-
-  private shouldEndCall(text: string): boolean {
-    return text.includes(this.callEndMarker);
-  }
-
-  private isCallEndingUserText(text: string): boolean {
-    return /\b(bye|goodbye|that'?s all|that is all|nothing else|no thanks|no thank you|all good|end the call|hang up)\b/i.test(
-      text,
+      task.responsePolicy.hardMaxResponseChars,
     );
   }
 
@@ -283,7 +264,14 @@ export class OrchestratorService {
       .trim();
   }
 
-  private limitResponseForPhoneCall(text: string, maxChars: number): string {
+  private limitResponseLength(
+    text: string,
+    maxChars: number | null,
+  ): string {
+    if (maxChars === null) {
+      return text;
+    }
+
     const clipped = text.slice(0, maxChars).trim();
     const sentences = clipped.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [clipped];
 

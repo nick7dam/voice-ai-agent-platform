@@ -23,7 +23,8 @@ interface TaskPayload {
   allowedTools: string[];
   responsePolicy: {
     style: string;
-    maxResponseChars: number;
+    responseLengthMode: 'short' | 'medium' | 'long' | 'unlimited';
+    hardMaxResponseChars: number | null;
     plainTextOnly: boolean;
   };
   memoryPolicy: {
@@ -82,14 +83,16 @@ describe('Health (e2e)', () => {
         systemPrompt: 'You are a local test assistant.',
         responsePolicy: {
           ...task.responsePolicy,
-          maxResponseChars: 120,
+          responseLengthMode: 'unlimited',
+          hardMaxResponseChars: null,
         },
       })
       .expect(200)
       .expect((response) => {
         const body = response.body as TaskResponse;
         expect(body.task.systemPrompt).toBe('You are a local test assistant.');
-        expect(body.task.responsePolicy.maxResponseChars).toBe(120);
+        expect(body.task.responsePolicy.responseLengthMode).toBe('unlimited');
+        expect(body.task.responsePolicy.hardMaxResponseChars).toBeNull();
       });
   });
 

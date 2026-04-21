@@ -9,6 +9,15 @@ export interface ConversationTurn {
   role: 'user' | 'assistant';
   text: string;
   at: string;
+  turnId?: string;
+}
+
+export interface InterruptedAssistantTurn {
+  turnId: string;
+  text: string;
+  reason?: string;
+  at: string;
+  finalized: boolean;
 }
 
 export interface SessionState {
@@ -22,5 +31,12 @@ export interface SessionState {
   turnSequence: number;
   activeTurnId?: string;
   interruptedTurnIds: string[];
+  assistantDraftTurn?: {
+    turnId: string;
+    text: string;
+    finalized: boolean;
+    updatedAt: string;
+  };
+  interruptedAssistantTurn?: InterruptedAssistantTurn;
   metadata?: Record<string, unknown>;
 }

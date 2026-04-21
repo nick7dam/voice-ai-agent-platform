@@ -52,12 +52,14 @@
       }
 
       input,
+      select,
       textarea,
       button {
         font: inherit;
       }
 
       input,
+      select,
       textarea {
         width: 100%;
         box-sizing: border-box;
@@ -262,8 +264,8 @@
         <h1>Voice Agent Local Demo</h1>
         <p>
           Start WebRTC voice to connect the browser microphone to the local
-          voice gateway. The gateway handles STT, Ollama reasoning, and
-          Chatterbox speech.
+          voice gateway. The gateway handles STT, Ollama reasoning, and Qwen
+          speech.
         </p>
 
         <label for="webrtcUrl">WebRTC gateway URL</label>
@@ -324,10 +326,24 @@
             <input id="responseStyle" />
           </div>
           <div>
-            <label for="maxResponseChars">Max response chars</label>
-            <input id="maxResponseChars" type="number" min="1" max="4000" />
+            <label for="responseLengthMode">Response length</label>
+            <select id="responseLengthMode">
+              <option value="short">short</option>
+              <option value="medium">medium</option>
+              <option value="long">long</option>
+              <option value="unlimited">unlimited</option>
+            </select>
           </div>
         </div>
+
+        <label for="hardMaxResponseChars">Hard max response chars</label>
+        <input
+          id="hardMaxResponseChars"
+          type="number"
+          min="1"
+          max="4000"
+          placeholder="Leave blank for no hard cap"
+        />
 
         <label class="check-row" for="memoryEnabled">
           <input id="memoryEnabled" type="checkbox" />

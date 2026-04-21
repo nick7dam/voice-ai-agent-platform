@@ -18,7 +18,8 @@ export const defaultTasks: TaskConfig[] = [
     allowedTools: [],
     responsePolicy: {
       style: 'warm, concise, spoken plain text',
-      maxResponseChars: 360,
+      responseLengthMode: 'short',
+      hardMaxResponseChars: 360,
       plainTextOnly: true,
     },
     memoryPolicy: {

@@ -1,6 +1,9 @@
+export type ResponseLengthMode = 'short' | 'medium' | 'long' | 'unlimited';
+
 export interface ResponsePolicy {
   style: string;
-  maxResponseChars: number;
+  responseLengthMode: ResponseLengthMode;
+  hardMaxResponseChars: number | null;
   plainTextOnly: boolean;
 }
 

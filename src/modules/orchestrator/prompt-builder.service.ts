@@ -14,7 +14,14 @@ export class PromptBuilderService {
     const systemSections = [
       task.systemPrompt,
       `Assistant name: ${task.name}`,
-      `Response style: ${task.responsePolicy.style}. Maximum ${task.responsePolicy.maxResponseChars} characters. Plain text only: ${String(task.responsePolicy.plainTextOnly)}.`,
+      session.interruptedAssistantTurn
+        ? this.describeInterruptedAssistantTurn(session)
+        : 'Interruption context: none.',
+      [
+        `Response style: ${task.responsePolicy.style}.`,
+        `Length: ${this.describeResponseLength(task)}.`,
+        `Plain text only: ${String(task.responsePolicy.plainTextOnly)}.`,
+      ].join(' '),
       task.behaviorGuidelines.length
         ? `Behavior guidelines:\n${task.behaviorGuidelines.map((item) => `- ${item}`).join('\n')}`
         : 'Behavior guidelines: none.',
@@ -22,7 +29,8 @@ export class PromptBuilderService {
         'Transport contract:',
         '- Return only user-facing plain text.',
         '- Do not use markdown, code blocks, JSON, tool call syntax, SSML, or stage directions.',
-        '- Keep responses concise because they are spoken by the voice transport.',
+        '- Keep responses easy to follow because they are spoken by the voice transport.',
+        '- Prefer concise replies unless the task or the user clearly asks for more detail.',
         '- If the conversation is clearly finished, include [[END_CALL]] at the very end.',
       ].join('\n'),
     ];
@@ -41,5 +49,46 @@ export class PromptBuilderService {
         content: currentUserText,
       },
     ];
+  }
+
+  private describeResponseLength(task: TaskConfig): string {
+    const modeDescriptions: Record<
+      TaskConfig['responsePolicy']['responseLengthMode'],
+      string
+    > = {
+      short: 'keep replies short by default',
+      medium: 'keep replies moderately detailed',
+      long: 'allow detailed multi-paragraph replies when helpful',
+      unlimited: 'allow long-form replies when the user asks for them',
+    };
+
+    const description = modeDescriptions[task.responsePolicy.responseLengthMode];
+    const hardMax = task.responsePolicy.hardMaxResponseChars;
+
+    if (hardMax === null) {
+      return description;
+    }
+
+    return `${description}; stay within ${hardMax} characters unless quoting or listing structured details is essential`;
+  }
+
+  private describeInterruptedAssistantTurn(session: SessionState): string {
+    const interrupted = session.interruptedAssistantTurn;
+    if (!interrupted) {
+      return 'Interruption context: none.';
+    }
+
+    const completion = interrupted.finalized
+      ? 'The assistant had already drafted a full reply, but the user may have heard only part of it.'
+      : 'The assistant was interrupted before finishing the reply.';
+
+    return [
+      'Interruption context:',
+      '- The user interrupted the assistant mid-response.',
+      `- ${completion}`,
+      '- Treat the next user message as a likely clarification, correction, answer, or redirect of that interrupted reply.',
+      '- Continue naturally from the interrupted topic instead of restarting from scratch.',
+      `- Interrupted assistant reply: "${interrupted.text}"`,
+    ].join('\n');
   }
 }
