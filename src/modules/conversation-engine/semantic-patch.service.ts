@@ -122,6 +122,93 @@ const emailSymbolWords = new Map<string, string>([
   ['plus', '+'],
 ]);
 
+interface CaptureUnit {
+  output: string;
+  spoken: string;
+}
+
+const letterCaptureUnits: CaptureUnit[] = [
+  ['A', 'ay'],
+  ['B', 'bee'],
+  ['C', 'see'],
+  ['D', 'dee'],
+  ['E', 'ee'],
+  ['F', 'ef'],
+  ['G', 'gee'],
+  ['H', 'aitch'],
+  ['I', 'eye'],
+  ['J', 'jay'],
+  ['K', 'kay'],
+  ['L', 'el'],
+  ['M', 'em'],
+  ['N', 'en'],
+  ['O', 'oh'],
+  ['P', 'pee'],
+  ['Q', 'cue'],
+  ['R', 'ar'],
+  ['S', 'ess'],
+  ['T', 'tee'],
+  ['U', 'you'],
+  ['V', 'vee'],
+  ['W', 'doubleu'],
+  ['X', 'ex'],
+  ['Y', 'why'],
+  ['Z', 'zed'],
+].map(([output, spoken]) => ({ output, spoken }));
+
+const digitCaptureUnits: CaptureUnit[] = [
+  ['0', 'zero'],
+  ['1', 'one'],
+  ['2', 'two'],
+  ['3', 'three'],
+  ['4', 'four'],
+  ['5', 'five'],
+  ['6', 'six'],
+  ['7', 'seven'],
+  ['8', 'eight'],
+  ['9', 'nine'],
+].map(([output, spoken]) => ({ output, spoken }));
+
+const emailCaptureUnits: CaptureUnit[] = [
+  ...letterCaptureUnits.map((unit) => ({
+    output: unit.output.toLowerCase(),
+    spoken: unit.spoken,
+  })),
+  ...digitCaptureUnits,
+  { output: '@', spoken: 'at' },
+  { output: '.', spoken: 'dot' },
+  { output: '_', spoken: 'underscore' },
+  { output: '-', spoken: 'dash' },
+  { output: '+', spoken: 'plus' },
+];
+
+const registrationMergedUnits = buildMergedUnits(
+  [...letterCaptureUnits, ...digitCaptureUnits],
+  (left, right) =>
+    /\d/.test(left.output) || /\d/.test(right.output),
+);
+
+const nameMergedUnits = buildMergedUnits(letterCaptureUnits, () => true);
+
+function buildMergedUnits(
+  units: CaptureUnit[],
+  include: (left: CaptureUnit, right: CaptureUnit) => boolean,
+): CaptureUnit[] {
+  const merged: CaptureUnit[] = [];
+  for (const left of units) {
+    for (const right of units) {
+      if (!include(left, right)) {
+        continue;
+      }
+      merged.push({
+        output: `${left.output}${right.output}`,
+        spoken: `${left.spoken}${right.spoken}`,
+      });
+    }
+  }
+  return merged;
+}
+
 @Injectable()
 export class SemanticPatchService {
   buildPatches(
@@ -799,6 +886,27 @@ export class SemanticPatchService {
       if (/^[a-z]+$/.test(token) && token.length === 1) {
         return token.toLowerCase();
       }
+      const fuzzyName = this.fuzzyNormalizeToken(token, captureTarget);
+      if (fuzzyName) {
+        return fuzzyName.toLowerCase();
+      }
+      return '';
+    }
+
+    if (captureTarget === 'vehicleRegistration') {
+      if (spokenLetterWords.has(token)) {
+        return spokenLetterWords.get(token) ?? '';
+      }
+      if (numberWords.has(token)) {
+        return numberWords.get(token) ?? '';
+      }
+      if (/^[a-z0-9]{1,3}$/i.test(token)) {
+        return token.toUpperCase();
+      }
+      const fuzzyRegistration = this.fuzzyNormalizeToken(token, captureTarget);
+      if (fuzzyRegistration) {
+        return fuzzyRegistration.toUpperCase();
+      }
       return '';
     }
 
@@ -808,11 +916,157 @@ export class SemanticPatchService {
     if (numberWords.has(token)) {
       return numberWords.get(token) ?? '';
     }
+    const fuzzyFallback = this.fuzzyNormalizeToken(token, captureTarget);
+    if (fuzzyFallback) {
+      return fuzzyFallback;
+    }
     if (/^[a-z0-9]+$/i.test(token)) {
       return token.toUpperCase();
     }
 
     return '';
+  }
+
+  private fuzzyNormalizeToken(
+    token: string,
+    captureTarget: Exclude<CaptureSlotKey, null>,
+  ): string {
+    const units = this.getFuzzyUnits(captureTarget);
+    if (!units.length) {
+      return '';
+    }
+
+    const normalizedToken = this.normalizeForFuzzy(token);
+    if (!normalizedToken || normalizedToken.length < 2) {
+      return '';
+    }
+
+    const tokenSkeleton = this.getPhoneticSkeleton(normalizedToken);
+    let bestMatch = '';
+    let bestScore = 0;
+
+    for (const unit of units) {
+      const normalizedCandidate = this.normalizeForFuzzy(unit.spoken);
+      if (!normalizedCandidate) {
+        continue;
+      }
+
+      const candidateSkeleton = this.getPhoneticSkeleton(normalizedCandidate);
+      if (
+        tokenSkeleton &&
+        candidateSkeleton &&
+        tokenSkeleton[0] !== candidateSkeleton[0]
+      ) {
+        continue;
+      }
+
+      const exactScore = this.stringSimilarity(
+        normalizedToken,
+        normalizedCandidate,
+      );
+      const skeletonScore = this.stringSimilarity(
+        tokenSkeleton,
+        candidateSkeleton,
+      );
+      const score = exactScore * 0.28 + skeletonScore * 0.72;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = unit.output;
+      }
+    }
+
+    return bestScore >= this.getFuzzyThreshold(captureTarget) ? bestMatch : '';
+  }
+
+  private getFuzzyUnits(
+    captureTarget: Exclude<CaptureSlotKey, null>,
+  ): CaptureUnit[] {
+    switch (captureTarget) {
+      case 'vehicleRegistration':
+        return [...letterCaptureUnits, ...digitCaptureUnits, ...registrationMergedUnits];
+      case 'customerName':
+        return [...letterCaptureUnits, ...nameMergedUnits];
+      case 'phoneNumber':
+        return digitCaptureUnits;
+      case 'customerEmail':
+        return emailCaptureUnits;
+      default:
+        return [];
+    }
+  }
+
+  private getFuzzyThreshold(
+    captureTarget: Exclude<CaptureSlotKey, null>,
+  ): number {
+    switch (captureTarget) {
+      case 'vehicleRegistration':
+        return 0.8;
+      case 'customerName':
+        return 0.88;
+      case 'customerEmail':
+        return 0.9;
+      case 'phoneNumber':
+        return 0.94;
+      default:
+        return 1;
+    }
+  }
+
+  private normalizeForFuzzy(text: string): string {
+    return text.toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  private getPhoneticSkeleton(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .replace(/[aeiouwhy]/g, '')
+      .replace(/(.)\1+/g, '$1');
+  }
+
+  private stringSimilarity(left: string, right: string): number {
+    if (!left && !right) {
+      return 1;
+    }
+    if (!left || !right) {
+      return 0;
+    }
+    if (left === right) {
+      return 1;
+    }
+
+    const distance = this.levenshteinDistance(left, right);
+    return 1 - distance / Math.max(left.length, right.length);
+  }
+
+  private levenshteinDistance(left: string, right: string): number {
+    const rows = left.length + 1;
+    const cols = right.length + 1;
+    const matrix = Array.from({ length: rows }, () =>
+      Array.from<number>({ length: cols }).fill(0),
+    );
+
+    for (let row = 0; row < rows; row += 1) {
+      matrix[row][0] = row;
+    }
+    for (let col = 0; col < cols; col += 1) {
+      matrix[0][col] = col;
+    }
+
+    for (let row = 1; row < rows; row += 1) {
+      for (let col = 1; col < cols; col += 1) {
+        const substitutionCost =
+          left[row - 1] === right[col - 1] ? 0 : 1;
+        matrix[row][col] = Math.min(
+          matrix[row - 1][col] + 1,
+          matrix[row][col - 1] + 1,
+          matrix[row - 1][col - 1] + substitutionCost,
+        );
+      }
+    }
+
+    return matrix[rows - 1][cols - 1];
   }
 
   private stripSlotLeadIn(text: string, patterns: RegExp[]): string {

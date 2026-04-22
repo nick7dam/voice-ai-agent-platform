@@ -142,6 +142,23 @@ describe('ConversationEngineService', () => {
     );
   });
 
+  it('normalizes low-latency fused spelling for vehicle registration capture', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    const firstCommit = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(firstCommit?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, 'ABC duty 4');
+    const committed = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(committed?.liveIntent.slots.vehicleRegistration.value).toBe(
+      'ABCD24',
+    );
+    expect(committed?.decision.slotKey).toBe('customerName');
+  });
+
   it('captures a spelled customer name after asking for it', () => {
     const { sessions, service } = createService();
     const session = sessions.create('car_booking_receptionist');
