@@ -162,6 +162,11 @@ type BookingGraphTurnDecision = {
   slotKey?: BookingSlotKey;
   shouldReason: true;
 };
+type HeuristicTurnExtraction = {
+  userMove: BookingGraphTurnExtraction['userMove'];
+  requestedSlotKey: BookingGraphTurnExtraction['requestedSlotKey'];
+  extractedUpdates: BookingGraphTurnExtraction['slotUpdates'];
+};
 
 export interface BookingGraphTurnResult {
   replyText: string;
@@ -237,6 +242,15 @@ export class BookingGraphService {
       return quickMove;
     }
 
+    const heuristic = this.extractHeuristicTurn(state);
+    if (
+      heuristic.userMove !== 'unknown' ||
+      heuristic.requestedSlotKey !== null ||
+      heuristic.extractedUpdates.length > 0
+    ) {
+      return heuristic;
+    }
+
     try {
       const response = await this.reasoning.generate({
         messages: this.buildExtractionMessages(state),
@@ -251,11 +265,7 @@ export class BookingGraphService {
         extractedUpdates: parsed.slotUpdates,
       };
     } catch {
-      return {
-        userMove: 'unknown',
-        requestedSlotKey: null,
-        extractedUpdates: [],
-      };
+      return heuristic;
     }
   }
 
@@ -651,6 +661,157 @@ export class BookingGraphService {
         requestedSlotKey: null,
         extractedUpdates: [],
       };
+    }
+
+    return null;
+  }
+
+  private extractHeuristicTurn(
+    state: BookingGraphStateValue,
+  ): HeuristicTurnExtraction {
+    const text = state.currentUserText.trim();
+    const lower = text.toLowerCase();
+    const extractedUpdates: z.infer<typeof extractedSlotUpdateSchema>[] = [];
+
+    const serviceType = this.detectServiceType(lower);
+    if (serviceType) {
+      extractedUpdates.push({
+        slotKey: 'serviceType',
+        value: serviceType,
+        confidence: 0.92,
+      });
+    }
+
+    const registration =
+      state.focusSlot === 'vehicleRegistration' ||
+      state.confirmationTarget === 'vehicleRegistration' ||
+      /\b(rego|registration|plate)\b/i.test(lower)
+        ? this.detectRegistration(text)
+        : null;
+    if (registration) {
+      extractedUpdates.push({
+        slotKey: 'vehicleRegistration',
+        value: registration,
+        confidence: 0.86,
+      });
+    }
+
+    const phoneNumber =
+      state.focusSlot === 'phoneNumber' || /\b(phone|mobile|number)\b/i.test(lower)
+        ? this.detectPhoneNumber(lower)
+        : null;
+    if (phoneNumber) {
+      extractedUpdates.push({
+        slotKey: 'phoneNumber',
+        value: phoneNumber,
+        confidence: 0.9,
+      });
+    }
+
+    const customerName =
+      state.focusSlot === 'customerName' ? this.detectName(text) : this.detectNamedName(text);
+    if (customerName) {
+      extractedUpdates.push({
+        slotKey: 'customerName',
+        value: customerName,
+        confidence: 0.88,
+      });
+    }
+
+    return {
+      userMove: extractedUpdates.length ? 'provide_info' : 'unknown',
+      requestedSlotKey: null,
+      extractedUpdates,
+    };
+  }
+
+  private detectServiceType(lower: string): string | null {
+    const serviceMatchers: Array<{ pattern: RegExp; value: string }> = [
+      { pattern: /\boil change\b/i, value: 'oil change' },
+      { pattern: /\blog ?book service\b/i, value: 'logbook service' },
+      { pattern: /\bgeneral service\b/i, value: 'general service' },
+      { pattern: /\btyre replacement\b|\btire replacement\b/i, value: 'tire replacement' },
+      { pattern: /\btyre change\b|\btire change\b/i, value: 'tire change' },
+      { pattern: /\bwheel alignment\b/i, value: 'wheel alignment' },
+      { pattern: /\bbrake service\b/i, value: 'brake service' },
+      { pattern: /\bbattery replacement\b/i, value: 'battery replacement' },
+    ];
+
+    for (const matcher of serviceMatchers) {
+      if (matcher.pattern.test(lower)) {
+        return matcher.value;
+      }
+    }
+
+    return null;
+  }
+
+  private detectRegistration(text: string): string | null {
+    const compact = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (compact.length >= 3 && compact.length <= 8 && /[A-Z]/.test(compact)) {
+      return compact;
+    }
+
+    const spacedTokens = text
+      .toUpperCase()
+      .split(/[^A-Z0-9]+/)
+      .filter(Boolean)
+      .filter((token) => token.length === 1);
+    if (
+      spacedTokens.length >= 3 &&
+      spacedTokens.length <= 8 &&
+      spacedTokens.some((token) => /[A-Z]/.test(token))
+    ) {
+      return spacedTokens.join('');
+    }
+
+    return null;
+  }
+
+  private detectPhoneNumber(lower: string): string | null {
+    const digitsOnly = lower.replace(/\D/g, '');
+    if (digitsOnly.length >= 8) {
+      return digitsOnly;
+    }
+
+    const tokenMap: Record<string, string> = {
+      zero: '0',
+      oh: '0',
+      o: '0',
+      one: '1',
+      two: '2',
+      three: '3',
+      four: '4',
+      five: '5',
+      six: '6',
+      seven: '7',
+      eight: '8',
+      nine: '9',
+    };
+    const spokenDigits = lower
+      .split(/[^a-z0-9]+/)
+      .map((token) => tokenMap[token] ?? '')
+      .join('');
+    return spokenDigits.length >= 8 ? spokenDigits : null;
+  }
+
+  private detectNamedName(text: string): string | null {
+    const match = text.match(/\bmy name is ([a-z][a-z'\-]+(?: [a-z][a-z'\-]+){0,3})/i);
+    return match?.[1]?.trim() ?? null;
+  }
+
+  private detectName(text: string): string | null {
+    const cleaned = text.replace(/[^\p{L}' -]/gu, ' ').replace(/\s+/g, ' ').trim();
+    if (!cleaned) {
+      return null;
+    }
+
+    const words = cleaned.split(' ');
+    if (
+      words.length <= 4 &&
+      words.every((word) => /^[\p{L}'-]+$/u.test(word))
+    ) {
+      return cleaned;
     }
 
     return null;

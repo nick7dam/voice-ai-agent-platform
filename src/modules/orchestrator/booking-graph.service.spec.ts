@@ -149,6 +149,29 @@ describe('BookingGraphService', () => {
     );
   });
 
+  it('falls back to heuristic service type capture when structured extraction is unusable', async () => {
+    const { sessions, tasks, reasoning, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+    const task = tasks.get('car_booking_receptionist');
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'What is the vehicle registration?',
+    );
+
+    const result = await service.processTurn(
+      session,
+      task,
+      'turn-1',
+      'Oil change.',
+    );
+
+    expect(result.state.slots.serviceType.value).toBe('oil change');
+    expect(result.state.slots.serviceType.status).toBe('confirmed');
+    expect(result.decision.action).toBe('ask');
+    expect(result.decision.slotKey).toBe('vehicleRegistration');
+  });
+
   it('clears a provisional registration when the caller rejects it', async () => {
     const { sessions, tasks, reasoning, service } = createService();
     const session = sessions.create('car_booking_receptionist');
