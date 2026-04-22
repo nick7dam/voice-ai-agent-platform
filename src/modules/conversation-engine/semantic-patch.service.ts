@@ -151,7 +151,7 @@ const emailSymbolWords = new Map<string, string>([
 ]);
 
 const affirmativePattern =
-  /\b(yes|yeah|yep|correct|that(?:'s| is) right|sounds right|sure|exactly)\b/i;
+  /\b(yes|yeah|yep|correct|sure|exactly|sounds right|that(?:'s| is) (?:right|correct)|it(?:'s| is) (?:right|correct))\b/i;
 const negativePattern =
   /\b(no|nope|not correct|not right|wrong|incorrect|not entirely|that's wrong|that is wrong)\b/i;
 const fillerPattern =
@@ -216,22 +216,20 @@ export class SemanticPatchService {
     const promptContext = this.resolvePromptContext(session);
     const normalizedText = committedText.replace(/\s+/g, ' ').trim();
     const lower = normalizedText.toLowerCase();
+    const promptedConfirmation =
+      promptContext.slotKey !== null && promptContext.action === 'confirm';
+    const isAffirmativeConfirmation =
+      promptedConfirmation && affirmativePattern.test(lower);
+    const isNegativeConfirmation =
+      promptedConfirmation && negativePattern.test(lower);
 
-    if (
-      promptContext.slotKey &&
-      promptContext.action === 'confirm' &&
-      affirmativePattern.test(lower)
-    ) {
+    if (promptContext.slotKey && isAffirmativeConfirmation) {
       patches.push({
         type: 'confirm_slot',
         slotKey: promptContext.slotKey,
         at: now,
       });
-    } else if (
-      promptContext.slotKey &&
-      promptContext.action === 'confirm' &&
-      negativePattern.test(lower)
-    ) {
+    } else if (promptContext.slotKey && isNegativeConfirmation) {
       patches.push({
         type: 'clear_slot',
         slotKey: promptContext.slotKey,
@@ -239,7 +237,10 @@ export class SemanticPatchService {
       });
     }
 
-    if (!this.isPureConfirmationReply(lower)) {
+    const shouldSkipSlotExtraction =
+      isAffirmativeConfirmation || isNegativeConfirmation;
+
+    if (!shouldSkipSlotExtraction && !this.isPureConfirmationReply(lower)) {
       for (const slot of this.extractCarBookingSlots(session, normalizedText, promptContext)) {
         patches.push({
           type: 'upsert_slot',
@@ -380,12 +381,18 @@ export class SemanticPatchService {
 
     const registration = this.extractRegistration(text, promptContext.slotKey === 'vehicleRegistration');
     if (registration) {
+      const mergedRegistration = this.mergeRegistrationContinuation(
+        session,
+        promptContext,
+        text,
+        registration,
+      );
       updates.push({
         slotKey: 'vehicleRegistration',
-        value: registration.value,
-        canonicalValue: registration.value,
-        confidence: registration.confidence,
-        needsConfirmation: registration.needsConfirmation,
+        value: mergedRegistration.value,
+        canonicalValue: mergedRegistration.value,
+        confidence: mergedRegistration.confidence,
+        needsConfirmation: mergedRegistration.needsConfirmation,
       });
     }
 
@@ -492,6 +499,65 @@ export class SemanticPatchService {
     return {
       value: spoken,
       confidence: 0.76,
+      needsConfirmation: true,
+    };
+  }
+
+  private mergeRegistrationContinuation(
+    session: SessionState,
+    promptContext: PromptContext,
+    text: string,
+    candidate: { value: string; confidence: number; needsConfirmation: boolean },
+  ): { value: string; confidence: number; needsConfirmation: boolean } {
+    if (promptContext.slotKey !== 'vehicleRegistration') {
+      return candidate;
+    }
+
+    const current =
+      session.conversation?.liveIntent.slots.vehicleRegistration;
+    const currentValue = current?.canonicalValue ?? current?.value;
+    if (
+      !currentValue ||
+      !current?.needsConfirmation ||
+      current.status === 'confirmed'
+    ) {
+      return candidate;
+    }
+
+    const normalizedCurrent = currentValue.toUpperCase();
+    const normalizedCandidate = candidate.value.toUpperCase();
+    if (
+      !normalizedCurrent ||
+      !normalizedCandidate ||
+      normalizedCurrent === normalizedCandidate
+    ) {
+      return candidate;
+    }
+
+    if (
+      normalizedCurrent.includes(normalizedCandidate) ||
+      normalizedCandidate.includes(normalizedCurrent)
+    ) {
+      return {
+        value:
+          normalizedCandidate.length >= normalizedCurrent.length
+            ? normalizedCandidate
+            : normalizedCurrent,
+        confidence: Math.max(candidate.confidence, current.confidence),
+        needsConfirmation: true,
+      };
+    }
+
+    const compactText = text.replace(/\s+/g, ' ').trim();
+    const shortContinuation = compactText.split(' ').filter(Boolean).length <= 4;
+    const combined = `${normalizedCurrent}${normalizedCandidate}`;
+    if (!shortContinuation || !/^[A-Z0-9]{4,8}$/.test(combined)) {
+      return candidate;
+    }
+
+    return {
+      value: combined,
+      confidence: Math.min(Math.max(candidate.confidence, current.confidence), 0.82),
       needsConfirmation: true,
     };
   }
@@ -898,6 +964,15 @@ export class SemanticPatchService {
       'like',
       'this',
       'that',
+      'yes',
+      'yeah',
+      'yep',
+      'no',
+      'nope',
+      'ok',
+      'okay',
+      'continue',
+      'we',
       'not',
       'correct',
       'wrong',

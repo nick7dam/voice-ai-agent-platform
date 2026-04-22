@@ -213,12 +213,16 @@ If signaling opens but media never connects:
 - set `WEBRTC_ICE_TRANSPORT_POLICY=relay`
 - restart `pnpm local:voice:cuda` after changing `.env`
 
-If CUDA library resolution fails:
+If the ASR sidecar still fails on CUDA, reinstall a CUDA-enabled torch build in `.venv-asr`:
 
 ```bash
-export LD_LIBRARY_PATH=$(./.venv-asr/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH
+.venv-asr/bin/python -m pip install --upgrade "torch>=2.6,<3"
 pnpm local:asr:cuda
+```
 
+If the voice gateway fails with CUDA library resolution errors:
+
+```bash
 export LD_LIBRARY_PATH=$(./.venv-voice-chatterbox/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH
 pnpm local:voice:cuda
 ```

@@ -165,6 +165,60 @@ describe('ConversationEngineService', () => {
     expect(retry?.decision.slotKey).toBe('vehicleRegistration');
   });
 
+  it('confirms a prompted slot when the caller says yes with extra confirmation words', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    service.ingestFragment(session.id, '4 Z X 2 B X');
+    const confirmation = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(confirmation?.decision.action).toBe('confirm');
+    expect(confirmation?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, "Yes, that's correct.");
+    const accepted = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(accepted?.liveIntent.slots.vehicleRegistration.value).toBe('4ZX2BX');
+    expect(accepted?.liveIntent.slots.vehicleRegistration.status).toBe(
+      'confirmed',
+    );
+    expect(accepted?.liveIntent.slots.vehicleRegistration.needsConfirmation).toBe(
+      false,
+    );
+    expect(accepted?.decision.action).toBe('ask');
+    expect(accepted?.decision.slotKey).toBe('customerName');
+  });
+
+  it('extends a provisional registration when the caller continues spelling during confirmation', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    service.ingestFragment(session.id, 'Four Z X.');
+    const firstConfirmation = service.commitPendingThought(
+      session.id,
+      'hold_timeout',
+    );
+    expect(firstConfirmation?.liveIntent.slots.vehicleRegistration.value).toBe(
+      '4ZX',
+    );
+    expect(firstConfirmation?.decision.action).toBe('confirm');
+
+    service.ingestFragment(session.id, '2 B X.');
+    const extended = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(extended?.liveIntent.slots.vehicleRegistration.value).toBe('4ZX2BX');
+    expect(extended?.liveIntent.slots.vehicleRegistration.needsConfirmation).toBe(
+      true,
+    );
+    expect(extended?.decision.action).toBe('confirm');
+    expect(extended?.decision.slotKey).toBe('vehicleRegistration');
+  });
+
   it('infers confirmation context from the last assistant reply when the prompt focus is empty', () => {
     const { sessions, service } = createService();
     const session = sessions.create('car_booking_receptionist');

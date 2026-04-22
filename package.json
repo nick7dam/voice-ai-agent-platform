@@ -14,7 +14,7 @@
     "start:prod": "node dist/main.js",
     "check:ollama": "ts-node scripts/check-ollama.ts",
     "local:asr": ".venv-asr/bin/python services/local-ai/asr_sidecar.py",
-    "local:asr:cuda": "LOCAL_STT_DEVICE=cuda LOCAL_STT_LANGUAGE=en LOCAL_STT_QWEN_DTYPE=bfloat16 LD_LIBRARY_PATH=$(./.venv-asr/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-asr/bin/python services/local-ai/asr_sidecar.py",
+    "local:asr:cuda": "LOCAL_STT_DEVICE=cuda LOCAL_STT_LANGUAGE=en LOCAL_STT_QWEN_DTYPE=bfloat16 .venv-asr/bin/python services/local-ai/asr_sidecar.py",
     "local:voice": ".venv-voice-chatterbox/bin/python services/local-ai/webrtc_voice_gateway.py",
     "local:voice:cuda": "LOCAL_TTS_DEVICE=cuda LOCAL_STT_LANGUAGE=en LD_LIBRARY_PATH=$(./.venv-voice-chatterbox/bin/python scripts/print-cuda-library-path.py):$LD_LIBRARY_PATH .venv-voice-chatterbox/bin/python services/local-ai/webrtc_voice_gateway.py",
     "lint": "eslint \"{src,apps,libs,test,scripts}/**/*.ts\" --fix",

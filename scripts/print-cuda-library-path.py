@@ -14,7 +14,10 @@ OPTIONAL_MODULES = [
 
 
 def module_path(module_name: str) -> str | None:
-    spec = importlib.util.find_spec(module_name)
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ModuleNotFoundError:
+        return None
 
     if spec is None:
         return None
@@ -47,7 +50,8 @@ if missing:
     print(
         "Missing CUDA Python library packages: "
         + ", ".join(missing)
-        + ". Install services/local-ai/requirements-stt-cuda.txt first.",
+        + ". Install a CUDA-enabled torch build in this environment or make "
+        + "sure your system CUDA libraries are already available.",
         file=sys.stderr,
     )
     sys.exit(1)
