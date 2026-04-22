@@ -23,7 +23,8 @@ export interface ConversationProfile {
 const genericProfile: ConversationProfile = {
   key: 'generic',
   intentName: 'general_assistance',
-  description: 'General spoken assistant flow without task-specific slot logic.',
+  description:
+    'General spoken assistant flow without task-specific slot logic.',
   defaultHoldMs: 120,
   incompleteHoldMs: 250,
   slotOrder: [],
@@ -90,7 +91,7 @@ const carBookingReceptionistProfile: ConversationProfile = {
       label: 'email address',
       required: false,
       askPrompt:
-        "Would you like to add an email address for the booking? You can say it like name at gmail dot com.",
+        'Would you like to add an email address for the booking? You can say it like name at gmail dot com.',
     },
     preferredDate: {
       key: 'preferredDate',
@@ -115,7 +116,10 @@ const carBookingReceptionistProfile: ConversationProfile = {
 
 @Injectable()
 export class ConversationProfileRegistryService {
-  private readonly profiles = new Map<ConversationProfileKey, ConversationProfile>([
+  private readonly profiles = new Map<
+    ConversationProfileKey,
+    ConversationProfile
+  >([
     ['generic', genericProfile],
     ['car_booking_receptionist', carBookingReceptionistProfile],
   ]);

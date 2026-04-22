@@ -25,6 +25,9 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@langchain/core": "^1.1.41",
+    "@langchain/langgraph": "^1.2.9",
+    "@langchain/ollama": "^1.2.6",
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",

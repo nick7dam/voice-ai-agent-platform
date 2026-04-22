@@ -3,6 +3,7 @@ import { ConversationEngineModule } from '../conversation-engine/conversation-en
 import { ReasoningModule } from '../reasoning/reasoning.module';
 import { SessionsModule } from '../sessions/sessions.module';
 import { TasksModule } from '../tasks/tasks.module';
+import { BookingGraphService } from './booking-graph.service';
 import { OrchestratorService } from './orchestrator.service';
 import { PromptBuilderService } from './prompt-builder.service';
 
@@ -13,7 +14,7 @@ import { PromptBuilderService } from './prompt-builder.service';
     ReasoningModule,
     ConversationEngineModule,
   ],
-  providers: [OrchestratorService, PromptBuilderService],
+  providers: [OrchestratorService, PromptBuilderService, BookingGraphService],
   exports: [OrchestratorService],
 })
 export class OrchestratorModule {}

@@ -103,7 +103,9 @@ export class DialoguePolicyService {
     }
 
     const slotNeedingConfirmation =
-      promptedSlot && promptedSlot.slot.value && !this.isSlotActionReady(promptedSlot.slot)
+      promptedSlot &&
+        promptedSlot.slot.value &&
+        !this.isSlotActionReady(promptedSlot.slot)
         ? promptedSlot
         : this.findNextSlotNeedingConfirmation(state, profile);
     if (slotNeedingConfirmation) {
@@ -114,7 +116,10 @@ export class DialoguePolicyService {
       );
     }
 
-    const nextMissingActionSlot = this.findNextMissingActionSlot(state, profile);
+    const nextMissingActionSlot = this.findNextMissingActionSlot(
+      state,
+      profile,
+    );
     if (nextMissingActionSlot) {
       return {
         action: 'ask',
@@ -135,7 +140,10 @@ export class DialoguePolicyService {
       };
     }
 
-    const nextMissingRequired = this.findNextMissingRequiredSlot(state, profile);
+    const nextMissingRequired = this.findNextMissingRequiredSlot(
+      state,
+      profile,
+    );
     if (nextMissingRequired) {
       return {
         action: 'ask',
@@ -295,7 +303,11 @@ export class DialoguePolicyService {
         ? 'slot_confirmation_requested'
         : 'slot_capture_requires_confirmation',
       slotKey: definition.key,
-      responseText: this.buildConfirmationPrompt(definition.key, definition.label, slot),
+      responseText: this.buildConfirmationPrompt(
+        definition.key,
+        definition.label,
+        slot,
+      ),
       committedUserText,
       shouldReason: true,
     };

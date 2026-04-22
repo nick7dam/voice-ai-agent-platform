@@ -7,6 +7,7 @@ import { ConversationEngineService } from '../conversation-engine/conversation-e
 import { ReasoningService } from '../reasoning/reasoning.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { TaskRegistryService } from '../tasks/task-registry.service';
+import { BookingGraphService } from './booking-graph.service';
 import { TaskConfig } from '../tasks/task-config.types';
 import { PromptBuilderService } from './prompt-builder.service';
 
@@ -23,6 +24,7 @@ export class OrchestratorService {
     private readonly prompts: PromptBuilderService,
     private readonly reasoning: ReasoningService,
     private readonly conversations: ConversationEngineService,
+    private readonly bookingGraph: BookingGraphService,
   ) {}
 
   async handleTranscript(
@@ -56,6 +58,20 @@ export class OrchestratorService {
 
       const session = this.sessions.get(sessionId);
       const task = this.tasks.get(session.taskKey, true);
+
+      if (task.key === 'car_booking_receptionist') {
+        await this.handleBookingGraphTranscript(
+          sessionId,
+          turnId,
+          trimmedTranscript,
+          session,
+          task,
+          startedAt,
+          emit,
+        );
+        return;
+      }
+
       const decision = this.conversations.consumeLastDecision(
         session,
         trimmedTranscript,
@@ -241,6 +257,81 @@ export class OrchestratorService {
     } catch {
       return false;
     }
+  }
+
+  private async handleBookingGraphTranscript(
+    sessionId: string,
+    turnId: string,
+    transcript: string,
+    session: ReturnType<SessionsService['get']>,
+    task: TaskConfig,
+    startedAt: bigint,
+    emit: OrchestratorEmit,
+  ): Promise<void> {
+    this.sessions.setState(sessionId, 'reasoning');
+    emit({
+      type: 'reasoning.started',
+      sessionId,
+      timestamp: nowIso(),
+      payload: { turnId },
+    });
+
+    this.sessions.appendHistory(sessionId, {
+      role: 'user',
+      text: transcript,
+      at: nowIso(),
+      turnId,
+    });
+
+    const result = await this.bookingGraph.processTurn(
+      session,
+      task,
+      turnId,
+      transcript,
+    );
+
+    if (!this.isTurnCurrent(sessionId, turnId)) {
+      throw new AppError(
+        'TURN_INTERRUPTED',
+        'Reasoning stopped because a newer turn interrupted this response.',
+      );
+    }
+
+    emit({
+      type: 'reasoning.first_token',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        turnId,
+        latencyMs: elapsedMs(startedAt),
+        source: 'generate',
+      },
+    });
+
+    const safeText = this.normalizeAssistantText(result.replyText, task);
+    this.sessions.noteAssistantText(sessionId, turnId, safeText, true);
+
+    emit({
+      type: 'assistant.text.chunk',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        turnId,
+        text: safeText,
+        index: 0,
+        final: true,
+      },
+    });
+
+    this.emitAssistantText(sessionId, turnId, safeText, startedAt, emit);
+    this.sessions.appendHistory(sessionId, {
+      role: 'assistant',
+      text: safeText,
+      at: nowIso(),
+      turnId,
+    });
+    this.sessions.clearInterruptedAssistantTurn(sessionId);
+    this.sessions.setState(sessionId, 'idle');
   }
 
   private emitAssistantText(
