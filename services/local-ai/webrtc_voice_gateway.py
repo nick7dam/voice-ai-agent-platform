@@ -45,6 +45,10 @@ DEFAULT_STT_COMPUTE_TYPE = "float16" if STT_DEVICE == "cuda" else "int8"
 STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
 STT_LANGUAGE = os.getenv("LOCAL_STT_LANGUAGE", "en").strip() or None
 STT_PRELOAD = env_bool("LOCAL_STT_PRELOAD", False)
+STT_BEAM_SIZE = max(1, int(os.getenv("LOCAL_STT_BEAM_SIZE", "2")))
+STT_BEST_OF = max(1, int(os.getenv("LOCAL_STT_BEST_OF", str(STT_BEAM_SIZE))))
+STT_INITIAL_PROMPT = os.getenv("LOCAL_STT_INITIAL_PROMPT", "").strip() or None
+STT_HOTWORDS = os.getenv("LOCAL_STT_HOTWORDS", "").strip() or None
 
 TTS_PROVIDER = "qwen3_tts"
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
@@ -144,12 +148,12 @@ BARGE_MIN_SPEECH_LIKE_MS = int(
 )
 PREROLL_MS = int(os.getenv("VOICE_VAD_PREROLL_MS", "450"))
 TRANSCRIPT_COALESCING_ENABLED = env_bool("VOICE_TRANSCRIPT_COALESCING_ENABLED", True)
-TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "650"))
+TRANSCRIPT_COMMIT_DELAY_MS = int(os.getenv("VOICE_TRANSCRIPT_COMMIT_DELAY_MS", "350"))
 TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS = int(
-    os.getenv("VOICE_TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS", "1200")
+    os.getenv("VOICE_TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS", "850")
 )
 TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS = int(
-    os.getenv("VOICE_TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS", "4000")
+    os.getenv("VOICE_TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS", "1800")
 )
 TRANSCRIPT_MAX_COALESCE_MS = int(os.getenv("VOICE_TRANSCRIPT_MAX_COALESCE_MS", "12000"))
 TRANSCRIPT_MIN_FINAL_WORDS = int(os.getenv("VOICE_TRANSCRIPT_MIN_FINAL_WORDS", "5"))
@@ -743,7 +747,11 @@ def trim_generated_silence(audio: np.ndarray, sample_rate: int) -> np.ndarray:
     return np.ascontiguousarray(audio[start:end], dtype=np.float32)
 
 
-def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
+def transcribe_samples(
+    samples: np.ndarray,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
+) -> Tuple[str, int]:
     started_at = time.perf_counter()
     temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
 
@@ -751,10 +759,12 @@ def transcribe_samples(samples: np.ndarray) -> Tuple[str, int]:
         segments, _ = get_whisper_model().transcribe(
             str(temp_path),
             language=STT_LANGUAGE,
-            beam_size=1,
-            best_of=1,
+            beam_size=STT_BEAM_SIZE,
+            best_of=STT_BEST_OF,
             vad_filter=False,
             condition_on_previous_text=False,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
         )
         text = " ".join(segment.text.strip() for segment in segments).strip()
         return text, elapsed_ms(started_at)
@@ -1505,6 +1515,8 @@ class NestControlClient:
                     await self.session.handle_assistant_text_chunk(event)
                 elif event_type == "assistant.response":
                     await self.session.handle_assistant_response(event)
+                elif event_type == "policy.decision":
+                    await self.session.handle_policy_decision(event)
                 elif event_type == "session.end_requested":
                     await self.session.handle_session_end_requested(event)
                 elif event_type == "session.interrupted":
@@ -1564,8 +1576,12 @@ class VoiceSession:
         self.pending_end_turn_id: Optional[str] = None
         self.pending_transcript: Optional[PendingTranscript] = None
         self.pending_transcript_task: Optional[asyncio.Task[None]] = None
+        self.task_key = DEFAULT_TASK_KEY
+        self.policy_focus_slot: Optional[str] = None
+        self.policy_action: Optional[str] = None
 
     async def start_control(self, task_key: str) -> None:
+        self.task_key = task_key
         self.control = NestControlClient(self, task_key)
         await self.control.connect()
 
@@ -2015,7 +2031,14 @@ class VoiceSession:
                 "payload": {"generation": generation, "samples": int(samples.size)},
             }
         )
-        text, latency_ms = await asyncio.to_thread(transcribe_samples, samples)
+        initial_prompt = self.build_stt_initial_prompt()
+        hotwords = self.build_stt_hotwords()
+        text, latency_ms = await asyncio.to_thread(
+            transcribe_samples,
+            samples,
+            initial_prompt,
+            hotwords,
+        )
         metric.stt_ended_at = time.perf_counter()
         text = text.strip()
         logger.info(
@@ -2059,6 +2082,83 @@ class VoiceSession:
 
         if self.control:
             await self.queue_user_transcript(text, metric)
+
+    async def handle_policy_decision(self, event: Dict[str, Any]) -> None:
+        payload = event.get("payload") or {}
+        slot_key = str(payload.get("slotKey") or "").strip() or None
+        action = str(payload.get("action") or "").strip() or None
+        self.policy_focus_slot = slot_key
+        self.policy_action = action
+
+    def build_stt_initial_prompt(self) -> Optional[str]:
+        parts: List[str] = []
+        if STT_INITIAL_PROMPT:
+            parts.append(STT_INITIAL_PROMPT)
+
+        if self.task_key == "car_booking_receptionist":
+            parts.append(
+                "Australian vehicle service booking call. Registrations, names, phone numbers, and email addresses may be spoken one character at a time."
+            )
+
+        if self.policy_focus_slot == "vehicleRegistration":
+            parts.append(
+                "The caller may be saying a vehicle registration. Transcribe letters and digits literally, for example 4 Z X 2 B or A B C 1 2 3."
+            )
+        elif self.policy_focus_slot == "phoneNumber":
+            parts.append(
+                "The caller may be saying a phone number digit by digit. Keep every spoken digit."
+            )
+        elif self.policy_focus_slot == "customerEmail":
+            parts.append(
+                "The caller may be saying an email address using words like at and dot. Preserve spelling carefully."
+            )
+        elif self.policy_focus_slot == "customerName":
+            parts.append(
+                "The caller may be saying or spelling a person name one letter at a time."
+            )
+
+        prompt = " ".join(part.strip() for part in parts if part and part.strip()).strip()
+        return prompt or None
+
+    def build_stt_hotwords(self) -> Optional[str]:
+        terms: List[str] = []
+        if STT_HOTWORDS:
+            terms.extend([term.strip() for term in STT_HOTWORDS.split(",") if term.strip()])
+
+        if self.task_key == "car_booking_receptionist":
+            terms.extend(
+                [
+                    "rego",
+                    "registration",
+                    "plate",
+                    "oil change",
+                    "logbook service",
+                    "service booking",
+                ]
+            )
+
+        if self.policy_focus_slot == "vehicleRegistration":
+            terms.extend(["vehicle registration", "rego", "plate"])
+        elif self.policy_focus_slot == "phoneNumber":
+            terms.extend(["phone number", "mobile"])
+        elif self.policy_focus_slot == "customerEmail":
+            terms.extend(["email", "gmail", "outlook", "hotmail"])
+        elif self.policy_focus_slot == "customerName":
+            terms.extend(["name"])
+
+        unique_terms = []
+        seen = set()
+        for term in terms:
+            normalized = term.lower()
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_terms.append(term)
+
+        if not unique_terms:
+            return None
+
+        return ", ".join(unique_terms)
 
     async def queue_user_transcript(self, text: str, metric: TurnLatency) -> None:
         if not TRANSCRIPT_COALESCING_ENABLED:

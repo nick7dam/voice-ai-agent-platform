@@ -150,8 +150,11 @@ describe('PromptBuilderService', () => {
 
     const messages = builder.build(session, task, 'Next Friday works best.', {
       decision: {
-        action: 'act',
-        reason: 'minimum_booking_context_ready',
+        action: 'ask',
+        reason: 'missing_action_ready_slot',
+        slotKey: 'customerName',
+        responseText:
+          'Can I get your name for the booking? You can spell it if that is easier.',
         committedUserText: 'Next Friday works best.',
         shouldReason: true,
       },
@@ -166,6 +169,10 @@ describe('PromptBuilderService', () => {
     expect(messages[0]?.content).toContain(
       'vehicle registration: "ABC123" [confirmed]',
     );
-    expect(messages[0]?.content).toContain('Action: act');
+    expect(messages[0]?.content).toContain('Action: ask');
+    expect(messages[0]?.content).toContain('Focus slot: customerName');
+    expect(messages[0]?.content).toContain(
+      'Suggested prompt: "Can I get your name for the booking? You can spell it if that is easier."',
+    );
   });
 });

@@ -1,4 +1,5 @@
 import type { AppConfig } from '../../config/app.config';
+import { nowIso } from '../../common/utils/timing';
 import { SessionsService } from '../sessions/sessions.service';
 import { ConversationEngineService } from './conversation-engine.service';
 import { ConversationProfileRegistryService } from './conversation-profile.registry';
@@ -99,8 +100,9 @@ describe('ConversationEngineService', () => {
     const committed = service.commitPendingThought(session.id, 'hold_timeout');
 
     expect(committed?.liveIntent.slots.vehicleRegistration.value).toBe('ABCD24');
-    expect(committed?.decision.action).toBe('ask');
-    expect(committed?.decision.slotKey).toBe('customerName');
+    expect(committed?.decision.action).toBe('confirm');
+    expect(committed?.decision.slotKey).toBe('vehicleRegistration');
+    expect(committed?.decision.shouldReason).toBe(true);
   });
 
   it('captures a phone number spoken digit by digit', () => {
@@ -237,6 +239,32 @@ describe('ConversationEngineService', () => {
     expect(retry?.decision.slotKey).toBe('vehicleRegistration');
   });
 
+  it('infers confirmation context from the assistant reply and clears the rego on no', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(
+      session.id,
+      'Oil change rego 4ZX2B. My name is Nick. My phone number is 0482906050. Friday.',
+    );
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    const liveSession = sessions.get(session.id);
+    liveSession.assistantDraftTurn = {
+      turnId: 'turn-confirm',
+      text: 'Your vehicle registration is 4ZX2B. Is that correct?',
+      finalized: true,
+      updatedAt: nowIso(),
+    };
+
+    service.ingestFragment(session.id, 'No.');
+    const retry = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(retry?.liveIntent.slots.vehicleRegistration.value).toBeNull();
+    expect(retry?.decision.action).toBe('ask');
+    expect(retry?.decision.slotKey).toBe('vehicleRegistration');
+  });
+
   it('can explicitly confirm an already captured registration without losing the flow', () => {
     const { sessions, service } = createService();
     const session = sessions.create('car_booking_receptionist');
@@ -257,5 +285,29 @@ describe('ConversationEngineService', () => {
       'vehicle registration',
     );
     expect(confirmation?.decision.responseText).toContain('A B C 1 2 3');
+  });
+
+  it('accumulates a registration across multiple committed partial spelling turns', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    service.ingestFragment(session.id, 'Z');
+    const firstPartial = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(firstPartial?.liveIntent.slots.vehicleRegistration.value).toBe('Z');
+    expect(firstPartial?.decision.slotKey).toBe('vehicleRegistration');
+    expect(firstPartial?.decision.shouldReason).toBe(true);
+
+    service.ingestFragment(session.id, 'BX');
+    const secondPartial = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(secondPartial?.liveIntent.slots.vehicleRegistration.value).toBe('ZBX');
+    expect(secondPartial?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, '2 B');
+    const completed = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(completed?.liveIntent.slots.vehicleRegistration.value).toBe('ZBX2B');
+    expect(['confirm', 'ask']).toContain(completed?.decision.action ?? '');
   });
 });

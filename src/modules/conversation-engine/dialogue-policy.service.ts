@@ -24,7 +24,11 @@ export class DialoguePolicyService {
     }
 
     const lower = state.pendingThought.text.toLowerCase();
-    if (/^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait)$/.test(lower)) {
+    if (
+      /^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait)$/.test(
+        lower,
+      )
+    ) {
       return {
         action: 'ignore',
         reason: 'filler_only',
@@ -46,7 +50,9 @@ export class DialoguePolicyService {
     profile: ConversationProfile,
   ): DialogueDecision {
     const state = session.conversation?.liveIntent;
-    const committedUserText = state?.pendingThought.text.replace(/\s+/g, ' ').trim();
+    const committedUserText = state?.pendingThought.text
+      .replace(/\s+/g, ' ')
+      .trim();
 
     if (!state || !committedUserText) {
       return {
@@ -55,9 +61,11 @@ export class DialoguePolicyService {
       };
     }
 
-    if (/^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait)$/.test(
-      committedUserText.toLowerCase(),
-    )) {
+    if (
+      /^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait)$/.test(
+        committedUserText.toLowerCase(),
+      )
+    ) {
       return {
         action: 'ignore',
         reason: 'filler_only',
@@ -108,11 +116,14 @@ export class DialoguePolicyService {
         slotKey: correctedSlot.key,
         responseText: `Thanks. Just to confirm, the ${correctedSlot.label} is ${correctedSlot.value}.`,
         committedUserText,
-        shouldReason: false,
+        shouldReason: true,
       };
     }
 
-    const nextMissingActionSlot = this.findNextMissingActionSlot(state, profile);
+    const nextMissingActionSlot = this.findNextMissingActionSlot(
+      state,
+      profile,
+    );
     if (nextMissingActionSlot) {
       return {
         action: 'ask',
@@ -120,7 +131,7 @@ export class DialoguePolicyService {
         slotKey: nextMissingActionSlot.key,
         responseText: nextMissingActionSlot.askPrompt,
         committedUserText,
-        shouldReason: false,
+        shouldReason: true,
       };
     }
 
@@ -133,7 +144,10 @@ export class DialoguePolicyService {
       };
     }
 
-    const nextMissingRequired = this.findNextMissingRequiredSlot(state, profile);
+    const nextMissingRequired = this.findNextMissingRequiredSlot(
+      state,
+      profile,
+    );
     if (nextMissingRequired) {
       return {
         action: 'ask',
@@ -141,7 +155,7 @@ export class DialoguePolicyService {
         slotKey: nextMissingRequired.key,
         responseText: nextMissingRequired.askPrompt,
         committedUserText,
-        shouldReason: false,
+        shouldReason: true,
       };
     }
 
@@ -233,20 +247,24 @@ export class DialoguePolicyService {
     profile: ConversationProfile,
   ) {
     const lower = committedUserText.toLowerCase();
+    const requestPattern =
+      /\b(confirm|check|repeat|read back|readback|say back)\b/;
     const requestedSlotKey = profile.slotOrder.find((slotKey) => {
       switch (slotKey) {
         case 'vehicleRegistration':
-          return /\b(confirm|check|repeat)\b.*\b(rego|registration|plate)\b/.test(
-            lower,
+          return (
+            requestPattern.test(lower) &&
+            /\b(rego|registration|plate|regal)\b/.test(lower)
           );
         case 'phoneNumber':
-          return /\b(confirm|check|repeat)\b.*\b(phone|mobile|number)\b/.test(
-            lower,
+          return (
+            requestPattern.test(lower) &&
+            /\b(phone|mobile|number)\b/.test(lower)
           );
         case 'customerEmail':
-          return /\b(confirm|check|repeat)\b.*\b(email|e-mail)\b/.test(lower);
+          return requestPattern.test(lower) && /\b(email|e-mail)\b/.test(lower);
         case 'customerName':
-          return /\b(confirm|check|repeat)\b.*\b(name)\b/.test(lower);
+          return requestPattern.test(lower) && /\b(name)\b/.test(lower);
         default:
           return false;
       }
@@ -288,7 +306,7 @@ export class DialoguePolicyService {
         slotKey: definition.key,
         responseText: this.buildRecapturePrompt(definition, slot),
         committedUserText,
-        shouldReason: false,
+        shouldReason: true,
       };
     }
 
@@ -298,16 +316,18 @@ export class DialoguePolicyService {
         ? 'slot_confirmation_requested'
         : 'slot_capture_requires_confirmation',
       slotKey: definition.key,
-      responseText: this.buildConfirmationPrompt(definition, slot, explicitRequest),
+      responseText: this.buildConfirmationPrompt(
+        definition,
+        slot,
+        explicitRequest,
+      ),
       committedUserText,
-      shouldReason: false,
+      shouldReason: true,
     };
   }
 
   private isSlotActionReady(
-    definition:
-      | ConversationProfile['slotDefinitions'][string]
-      | undefined,
+    definition: ConversationProfile['slotDefinitions'][string] | undefined,
     slot: IntentSlotState | undefined,
   ): boolean {
     if (!definition || !slot?.value) {
@@ -317,10 +337,7 @@ export class DialoguePolicyService {
     return slot.status === 'confirmed' && !slot.needsConfirmation;
   }
 
-  private shouldRecaptureSlot(
-    slotKey: string,
-    slot: IntentSlotState,
-  ): boolean {
+  private shouldRecaptureSlot(slotKey: string, slot: IntentSlotState): boolean {
     if (!slot.value) {
       return true;
     }
@@ -346,7 +363,11 @@ export class DialoguePolicyService {
   ): string {
     const formattedValue = this.formatSlotValueForSpeech(definition.key, slot);
 
-    if (explicitRequest && slot.status === 'confirmed' && !slot.needsConfirmation) {
+    if (
+      explicitRequest &&
+      slot.status === 'confirmed' &&
+      !slot.needsConfirmation
+    ) {
       return `I have the ${definition.label} as ${formattedValue}.`;
     }
 
@@ -408,7 +429,7 @@ export class DialoguePolicyService {
         incompleteReason,
       )
     ) {
-      return Math.max(profile.incompleteHoldMs, 2600);
+      return Math.max(profile.incompleteHoldMs, 800);
     }
 
     return profile.incompleteHoldMs;

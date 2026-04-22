@@ -125,6 +125,12 @@ export class PromptBuilderService {
             `- Action: ${decision.action}`,
             `- Reason: ${decision.reason}`,
             decision.slotKey ? `- Focus slot: ${decision.slotKey}` : null,
+            liveIntent.prompt.slotKey && liveIntent.prompt.action
+              ? `- Prompt focus: ${liveIntent.prompt.slotKey} [${liveIntent.prompt.action}]`
+              : null,
+            decision.responseText
+              ? `- Suggested prompt: "${decision.responseText}"`
+              : null,
             `- Use reasoning: ${String(Boolean(decision.shouldReason))}`,
           ]
             .filter(Boolean)
@@ -135,6 +141,9 @@ export class PromptBuilderService {
         '- Treat confirmed slot values as the source of truth unless the user corrects them.',
         '- Do not ask again for details that are already confirmed unless the user changes them.',
         '- If the live intent already contains enough booking context, continue from that context instead of restarting the intake.',
+        '- If the dialogue policy action is ask, ask only for the focus slot and keep it brief.',
+        '- If the dialogue policy action is confirm, confirm or recapture only the focus slot using the current slot value and the latest user correction.',
+        '- If the dialogue policy action is act, continue naturally from the collected state instead of falling back to a stock intake prompt.',
       ].join('\n'),
     ];
 
