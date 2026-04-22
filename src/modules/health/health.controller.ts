@@ -11,6 +11,13 @@ export class HealthController {
   @Get()
   async getHealth() {
     const ollamaReachability = await this.checkOllama();
+    const sttBackend = process.env.LOCAL_STT_BACKEND ?? 'qwen_asr';
+    const asrHost = process.env.LOCAL_ASR_HOST ?? '127.0.0.1';
+    const asrPort = process.env.LOCAL_ASR_PORT ?? '8005';
+    const sttLocation =
+      sttBackend === 'qwen_asr'
+        ? 'services/local-ai/asr_sidecar.py'
+        : 'services/local-ai/webrtc_voice_gateway.py';
 
     return {
       status: 'ok',
@@ -20,11 +27,14 @@ export class HealthController {
         controlWebSocketPath: this.config.wsPath,
       },
       stt: {
-        provider: process.env.LOCAL_STT_BACKEND ?? 'qwen_asr',
-        model:
-          process.env.LOCAL_STT_MODEL ??
-          'Qwen/Qwen3-ASR-0.6B',
-        location: 'webrtc_voice_gateway',
+        provider: sttBackend,
+        model: process.env.LOCAL_STT_MODEL ?? 'Qwen/Qwen3-ASR-0.6B',
+        location: sttLocation,
+        ...(sttBackend === 'qwen_asr'
+          ? {
+              sidecarUrl: `http://${asrHost}:${asrPort}/transcribe`,
+            }
+          : {}),
       },
       reasoning: {
         provider: 'ollama',

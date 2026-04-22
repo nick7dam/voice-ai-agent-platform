@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import inspect
 import json
 import logging
@@ -6,6 +7,8 @@ import os
 import re
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import wave
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -54,6 +57,11 @@ STT_QWEN_MAX_NEW_TOKENS = max(
     32, int(os.getenv("LOCAL_STT_QWEN_MAX_NEW_TOKENS", "256"))
 )
 STT_QWEN_USE_FLASH_ATTN = env_bool("LOCAL_STT_QWEN_USE_FLASH_ATTN", False)
+LOCAL_ASR_HOST = os.getenv("LOCAL_ASR_HOST", "127.0.0.1").strip() or "127.0.0.1"
+LOCAL_ASR_PORT = int(os.getenv("LOCAL_ASR_PORT", "8005"))
+LOCAL_ASR_REQUEST_TIMEOUT_MS = max(
+    1000, int(os.getenv("LOCAL_ASR_REQUEST_TIMEOUT_MS", "20000"))
+)
 
 TTS_PROVIDER = "qwen3_tts"
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
@@ -180,7 +188,6 @@ logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
 whisper_model: Optional[Any] = None
-qwen_asr_model: Optional[Any] = None
 qwen_tts_model: Optional[Any] = None
 
 
@@ -339,84 +346,65 @@ def get_whisper_model() -> Any:
     return whisper_model
 
 
-def resolve_qwen_asr_dtype() -> torch.dtype:
-    raw = STT_QWEN_DTYPE or ("bfloat16" if STT_DEVICE == "cuda" else "float32")
-    if raw in {"bf16", "bfloat16"}:
-        return torch.bfloat16
-    if raw in {"fp16", "float16", "half"}:
-        return torch.float16
-    if raw in {"fp32", "float32"}:
-        return torch.float32
-    raise RuntimeError(
-        "LOCAL_STT_QWEN_DTYPE must be one of: bfloat16, float16, float32"
+def asr_sidecar_url(path: str) -> str:
+    return f"http://{LOCAL_ASR_HOST}:{LOCAL_ASR_PORT}{path}"
+
+
+def get_asr_sidecar_health() -> Dict[str, Any]:
+    request = urllib.request.Request(asr_sidecar_url("/health"), method="GET")
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=LOCAL_ASR_REQUEST_TIMEOUT_MS / 1000,
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "LOCAL_STT_BACKEND=qwen_asr requires the local ASR sidecar to be "
+            f"running at {asr_sidecar_url('/health')}."
+        ) from exc
+
+
+def transcribe_with_asr_sidecar(
+    samples: np.ndarray,
+    initial_prompt: Optional[str] = None,
+    hotwords: Optional[str] = None,
+) -> Tuple[str, int]:
+    clipped = np.clip(samples, -1.0, 1.0)
+    pcm16 = (clipped * 32767.0).astype(np.int16)
+    payload = {
+        "samplesB64": base64.b64encode(pcm16.tobytes()).decode("ascii"),
+        "sampleRate": INPUT_SAMPLE_RATE,
+        "language": STT_LANGUAGE,
+        "initialPrompt": initial_prompt,
+        "hotwords": hotwords,
+    }
+    request = urllib.request.Request(
+        asr_sidecar_url("/transcribe"),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
 
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=LOCAL_ASR_REQUEST_TIMEOUT_MS / 1000,
+        ) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        details = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(
+            "ASR sidecar transcription failed with "
+            f"status={exc.code} body={details or '<empty>'}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "LOCAL_STT_BACKEND=qwen_asr requires the local ASR sidecar to be "
+            f"running at {asr_sidecar_url('/transcribe')}."
+        ) from exc
 
-def resolve_qwen_asr_language() -> Optional[str]:
-    if not STT_LANGUAGE:
-        return None
-
-    normalized = STT_LANGUAGE.strip().lower()
-    aliases = {
-        "en": "English",
-        "english": "English",
-        "zh": "Chinese",
-        "chinese": "Chinese",
-        "yue": "Cantonese",
-        "cantonese": "Cantonese",
-        "de": "German",
-        "german": "German",
-        "fr": "French",
-        "french": "French",
-        "es": "Spanish",
-        "spanish": "Spanish",
-        "it": "Italian",
-        "italian": "Italian",
-        "pt": "Portuguese",
-        "portuguese": "Portuguese",
-        "ja": "Japanese",
-        "japanese": "Japanese",
-        "ko": "Korean",
-        "korean": "Korean",
-    }
-    return aliases.get(normalized, STT_LANGUAGE)
-
-
-def get_qwen_asr_model() -> Any:
-    global qwen_asr_model
-    if qwen_asr_model is None:
-        try:
-            from qwen_asr import Qwen3ASRModel
-        except Exception as exc:
-            raise RuntimeError(
-                "LOCAL_STT_BACKEND=qwen_asr requires the qwen-asr package to be "
-                "installed in the voice gateway environment."
-            ) from exc
-
-        started_at = time.perf_counter()
-        model_kwargs: Dict[str, Any] = {
-            "dtype": resolve_qwen_asr_dtype(),
-            "device_map": "cuda:0" if STT_DEVICE == "cuda" else STT_DEVICE,
-            "max_inference_batch_size": 1,
-            "max_new_tokens": STT_QWEN_MAX_NEW_TOKENS,
-        }
-        if STT_QWEN_USE_FLASH_ATTN and STT_DEVICE == "cuda":
-            model_kwargs["attn_implementation"] = "flash_attention_2"
-
-        qwen_asr_model = Qwen3ASRModel.from_pretrained(
-            STT_MODEL_NAME,
-            **model_kwargs,
-        )
-        logger.info(
-            "voice.stt.loaded backend=%s model=%s device=%s dtype=%s latencyMs=%d",
-            resolve_stt_backend(),
-            STT_MODEL_NAME,
-            STT_DEVICE,
-            resolve_qwen_asr_dtype(),
-            elapsed_ms(started_at),
-        )
-
-    return qwen_asr_model
+    return str(body.get("text") or "").strip(), int(body.get("latencyMs") or 0)
 
 
 def resolve_tts_device() -> str:
@@ -854,23 +842,17 @@ def transcribe_samples(
     initial_prompt: Optional[str] = None,
     hotwords: Optional[str] = None,
 ) -> Tuple[str, int]:
-    started_at = time.perf_counter()
     backend = resolve_stt_backend()
 
     if backend == "qwen_asr":
-        results = get_qwen_asr_model().transcribe(
-            audio=(samples.astype(np.float32, copy=False), INPUT_SAMPLE_RATE),
-            language=resolve_qwen_asr_language(),
+        text, latency_ms = transcribe_with_asr_sidecar(
+            samples,
+            initial_prompt,
+            hotwords,
         )
-        first = results[0] if results else None
-        text = ""
-        if first is not None:
-            if hasattr(first, "text"):
-                text = str(first.text).strip()
-            elif isinstance(first, dict):
-                text = str(first.get("text") or "").strip()
-        return text, elapsed_ms(started_at)
+        return text, latency_ms
 
+    started_at = time.perf_counter()
     temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
     try:
         segments, _ = get_whisper_model().transcribe(
@@ -2747,7 +2729,13 @@ def preload_stt_model() -> None:
     started_at = time.perf_counter()
     backend = resolve_stt_backend()
     if backend == "qwen_asr":
-        get_qwen_asr_model()
+        health = get_asr_sidecar_health()
+        logger.info(
+            "voice.stt.sidecar.ready provider=%s model=%s device=%s",
+            health.get("provider"),
+            health.get("model"),
+            health.get("device"),
+        )
     else:
         get_whisper_model()
     logger.info("voice.stt.preload.end latencyMs=%d", elapsed_ms(started_at))
@@ -2810,12 +2798,13 @@ async def preload_models() -> None:
 async def main() -> None:
     ice_servers = browser_ice_servers()
     logger.info(
-        "voice.gateway.start host=%s port=%d nestWs=%s stt=%s/%s vadClassifier=%s vadDevice=%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
+        "voice.gateway.start host=%s port=%d nestWs=%s sttBackend=%s sttModel=%s sttSidecar=%s vadClassifier=%s vadDevice=%s ttsEngine=%s tts=%s/%s sampleRate=%d iceServers=%d iceTransportPolicy=%s",
         HOST,
         PORT,
         NEST_WS_URL,
+        resolve_stt_backend(),
         STT_MODEL_NAME,
-        STT_DEVICE,
+        asr_sidecar_url("/transcribe") if resolve_stt_backend() == "qwen_asr" else "embedded",
         VAD_CLASSIFIER,
         resolve_vad_model_device(),
         TTS_PROVIDER,
