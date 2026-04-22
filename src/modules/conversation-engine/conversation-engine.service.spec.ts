@@ -156,7 +156,8 @@ describe('ConversationEngineService', () => {
     expect(committed?.liveIntent.slots.vehicleRegistration.value).toBe(
       'ABCD24',
     );
-    expect(committed?.decision.slotKey).toBe('customerName');
+    expect(committed?.decision.action).toBe('confirm');
+    expect(committed?.decision.slotKey).toBe('vehicleRegistration');
   });
 
   it('captures a spelled customer name after asking for it', () => {
@@ -172,5 +173,89 @@ describe('ConversationEngineService', () => {
 
     expect(committed?.liveIntent.slots.customerName.value).toBe('Sarah');
     expect(committed?.decision.slotKey).toBe('phoneNumber');
+  });
+
+  it('keeps a weak merged registration in confirmation instead of advancing', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    const firstCommit = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(firstCommit?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, 'for ZX BX');
+    const committed = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(committed?.liveIntent.slots.vehicleRegistration.value).toBe('4ZXBX');
+    expect(committed?.liveIntent.slots.vehicleRegistration.status).toBe(
+      'provisional',
+    );
+    expect(committed?.liveIntent.slots.vehicleRegistration.needsConfirmation).toBe(
+      true,
+    );
+    expect(committed?.decision.action).toBe('confirm');
+    expect(committed?.decision.slotKey).toBe('vehicleRegistration');
+  });
+
+  it('clears a bad registration after the caller says it is wrong', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    service.ingestFragment(session.id, 'for ZX BX');
+    const confirmation = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(confirmation?.decision.action).toBe('confirm');
+    expect(confirmation?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, "That's not the correct registration.");
+    const correction = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(correction?.liveIntent.slots.vehicleRegistration.value).toBeNull();
+    expect(correction?.decision.action).toBe('ask');
+    expect(correction?.decision.slotKey).toBe('vehicleRegistration');
+  });
+
+  it('uses prompt focus so a plain no clears the slot being confirmed', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change.');
+    service.commitPendingThought(session.id, 'hold_timeout');
+
+    service.ingestFragment(session.id, 'ABC duty 4');
+    const confirmation = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(confirmation?.decision.action).toBe('confirm');
+    expect(confirmation?.decision.slotKey).toBe('vehicleRegistration');
+
+    service.ingestFragment(session.id, 'No');
+    const retry = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(retry?.liveIntent.slots.vehicleRegistration.value).toBeNull();
+    expect(retry?.decision.action).toBe('ask');
+    expect(retry?.decision.slotKey).toBe('vehicleRegistration');
+  });
+
+  it('can explicitly confirm an already captured registration without losing the flow', () => {
+    const { sessions, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+
+    service.ingestFragment(session.id, 'Oil change rego ABC123.');
+    const firstCommit = service.commitPendingThought(session.id, 'hold_timeout');
+    expect(firstCommit?.decision.slotKey).toBe('customerName');
+
+    service.ingestFragment(
+      session.id,
+      'Can you confirm the registration with me please?',
+    );
+    const confirmation = service.commitPendingThought(session.id, 'hold_timeout');
+
+    expect(confirmation?.decision.action).toBe('confirm');
+    expect(confirmation?.decision.slotKey).toBe('vehicleRegistration');
+    expect(confirmation?.decision.responseText).toContain(
+      'vehicle registration',
+    );
+    expect(confirmation?.decision.responseText).toContain('A B C 1 2 3');
   });
 });

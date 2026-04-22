@@ -89,6 +89,18 @@ export class ConversationEngineService {
         at: nowIso(),
       },
       {
+        type: 'set_prompt',
+        slotKey:
+          decision.slotKey && (decision.action === 'ask' || decision.action === 'confirm')
+            ? decision.slotKey
+            : null,
+        action:
+          decision.slotKey && (decision.action === 'ask' || decision.action === 'confirm')
+            ? decision.action
+            : null,
+        at: nowIso(),
+      },
+      {
         type: 'clear_pending_thought',
       },
     ]);

@@ -27,6 +27,7 @@ export interface IntentSlotState {
   canonicalValue: string | null;
   confidence: number;
   status: IntentSlotStatus;
+  needsConfirmation: boolean;
   updatedAt: string | null;
   sourceFragmentIds: string[];
 }
@@ -61,6 +62,11 @@ export interface LiveIntentState {
     lastUserActivityAt: string | null;
   };
   pendingThought: PendingThoughtState;
+  prompt: {
+    slotKey: string | null;
+    action: DialogueAction | null;
+    updatedAt: string | null;
+  };
   latestCommittedThought: string | null;
 }
 
@@ -86,7 +92,18 @@ export type SemanticPatch =
       canonicalValue?: string | null;
       confidence: number;
       status: IntentSlotStatus;
+      needsConfirmation?: boolean;
       fragmentId: string;
+      at: string;
+    }
+  | {
+      type: 'clear_slot';
+      slotKey: string;
+      at: string;
+    }
+  | {
+      type: 'confirm_slot';
+      slotKey: string;
       at: string;
     }
   | {
@@ -103,6 +120,12 @@ export type SemanticPatch =
     }
   | {
       type: 'clear_pending_thought';
+    }
+  | {
+      type: 'set_prompt';
+      slotKey: string | null;
+      action: DialogueAction | null;
+      at: string;
     };
 
 export type DialogueAction =

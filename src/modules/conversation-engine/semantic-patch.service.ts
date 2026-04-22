@@ -127,6 +127,26 @@ interface CaptureUnit {
   spoken: string;
 }
 
+interface ExtractedSlotValue {
+  slotKey: string;
+  value: string;
+  canonicalValue?: string | null;
+  confidence: number;
+  needsConfirmation?: boolean;
+}
+
+interface NormalizedCaptureToken {
+  output: string;
+  confidence: number;
+  merged: boolean;
+}
+
+interface RegistrationCapture {
+  candidate: string;
+  confidence: number;
+  hasMergedTokens: boolean;
+}
+
 const letterCaptureUnits: CaptureUnit[] = [
   ['A', 'ay'],
   ['B', 'bee'],
@@ -251,6 +271,15 @@ export class SemanticPatchService {
       },
     ];
 
+    patches.push(
+      ...this.extractControlPatches(
+        session,
+        profile,
+        combinedThought,
+        fragment,
+      ),
+    );
+
     if (profile.key === 'generic') {
       return patches;
     }
@@ -266,6 +295,10 @@ export class SemanticPatchService {
       });
     }
 
+    if (this.isSlotControlUtterance(combinedThought)) {
+      return patches;
+    }
+
     const slotUpdates = this.extractCarBookingSlots(combinedThought, captureTarget);
     for (const slotUpdate of slotUpdates) {
       patches.push({
@@ -275,6 +308,7 @@ export class SemanticPatchService {
         canonicalValue: slotUpdate.canonicalValue,
         confidence: slotUpdate.confidence,
         status: 'provisional',
+        needsConfirmation: slotUpdate.needsConfirmation,
         fragmentId: fragment.id,
         at: now,
       });
@@ -345,7 +379,7 @@ export class SemanticPatchService {
     }
 
     if (captureTarget === 'vehicleRegistration') {
-      const candidate = this.extractSpokenRegistrationCandidate(text);
+      const candidate = this.extractSpokenRegistrationCapture(text).candidate;
       if (candidate && candidate.length < 4) {
         return 'registration_capture_incomplete';
       }
@@ -377,7 +411,7 @@ export class SemanticPatchService {
     if (
       captureTarget === 'customerName' &&
       this.looksLikeSpelledName(text) &&
-      this.extractSpelledNameCandidate(text).length < 2
+      this.extractSpelledNameCapture(text).value.length < 2
     ) {
       return 'name_capture_incomplete';
     }
@@ -402,18 +436,8 @@ export class SemanticPatchService {
   private extractCarBookingSlots(
     text: string,
     captureTarget: CaptureSlotKey,
-  ): Array<{
-    slotKey: string;
-    value: string;
-    canonicalValue?: string | null;
-    confidence: number;
-  }> {
-    const updates: Array<{
-      slotKey: string;
-      value: string;
-      canonicalValue?: string | null;
-      confidence: number;
-    }> = [];
+  ): ExtractedSlotValue[] {
+    const updates: ExtractedSlotValue[] = [];
 
     const serviceType = this.extractServiceType(text);
     if (serviceType) {
@@ -429,10 +453,10 @@ export class SemanticPatchService {
     if (registration) {
       updates.push({
         slotKey: 'vehicleRegistration',
-        value: registration,
-        canonicalValue: registration,
-        confidence:
-          captureTarget === 'vehicleRegistration' ? 0.95 : 0.9,
+        value: registration.value,
+        canonicalValue: registration.value,
+        confidence: registration.confidence,
+        needsConfirmation: registration.needsConfirmation,
       });
     }
 
@@ -440,10 +464,10 @@ export class SemanticPatchService {
     if (name) {
       updates.push({
         slotKey: 'customerName',
-        value: name,
-        canonicalValue: name,
-        confidence:
-          captureTarget === 'customerName' ? 0.9 : 0.78,
+        value: name.value,
+        canonicalValue: name.value,
+        confidence: name.confidence,
+        needsConfirmation: name.needsConfirmation,
       });
     }
 
@@ -454,6 +478,7 @@ export class SemanticPatchService {
         value: phoneNumber.display,
         canonicalValue: phoneNumber.canonical,
         confidence: phoneNumber.confidence,
+        needsConfirmation: phoneNumber.needsConfirmation,
       });
     }
 
@@ -461,9 +486,10 @@ export class SemanticPatchService {
     if (customerEmail) {
       updates.push({
         slotKey: 'customerEmail',
-        value: customerEmail,
-        canonicalValue: customerEmail,
-        confidence: 0.92,
+        value: customerEmail.value,
+        canonicalValue: customerEmail.value,
+        confidence: customerEmail.confidence,
+        needsConfirmation: customerEmail.needsConfirmation,
       });
     }
 
@@ -526,7 +552,11 @@ export class SemanticPatchService {
   private extractCustomerName(
     text: string,
     captureTarget: CaptureSlotKey,
-  ): string | null {
+  ): {
+    value: string;
+    confidence: number;
+    needsConfirmation: boolean;
+  } | null {
     const match = text.match(
       /\b(?:my name is|this is|i am|i'm)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\b/i,
     );
@@ -540,7 +570,11 @@ export class SemanticPatchService {
       .trim();
 
     if (explicitName) {
-      return explicitName;
+      return {
+        value: explicitName,
+        confidence: 0.97,
+        needsConfirmation: false,
+      };
     }
 
     if (captureTarget !== 'customerName') {
@@ -552,13 +586,17 @@ export class SemanticPatchService {
       /\b(?:it'?s|that is|thats)\b/gi,
       /\b(?:spelled|spell that|spell it)\b/gi,
     ]);
-    const spelled = this.extractSpelledNameCandidate(stripped);
-    if (spelled.length >= 2) {
+    const spelled = this.extractSpelledNameCapture(stripped);
+    if (spelled.value.length >= 2) {
       return spelled;
     }
 
     if (this.looksLikePlainName(stripped)) {
-      return this.toTitleCase(stripped);
+      return {
+        value: this.toTitleCase(stripped),
+        confidence: 0.84,
+        needsConfirmation: false,
+      };
     }
 
     return null;
@@ -571,6 +609,7 @@ export class SemanticPatchService {
     canonical: string;
     display: string;
     confidence: number;
+    needsConfirmation: boolean;
   } | null {
     const lower = text.toLowerCase();
     const explicit =
@@ -600,13 +639,18 @@ export class SemanticPatchService {
             ? 0.97
             : 0.94
           : 0.68,
+      needsConfirmation: canonical.length < 10,
     };
   }
 
   private extractRegistration(
     text: string,
     captureTarget: CaptureSlotKey,
-  ): string | null {
+  ): {
+    value: string;
+    confidence: number;
+    needsConfirmation: boolean;
+  } | null {
     const explicit = /\b(rego|registration|plate)\b/i.test(text);
     const cleaned = text
       .toUpperCase()
@@ -621,16 +665,29 @@ export class SemanticPatchService {
       if (!/[A-Z]/.test(candidate) || !/\d/.test(candidate)) {
         continue;
       }
-      return candidate;
+      return {
+        value: candidate,
+        confidence: 0.98,
+        needsConfirmation: false,
+      };
     }
 
     if (!explicit && captureTarget !== 'vehicleRegistration') {
       return null;
     }
 
-    const candidate = this.extractSpokenRegistrationCandidate(text);
-    if (candidate.length >= 4 && candidate.length <= 8) {
-      return candidate;
+    const capture = this.extractSpokenRegistrationCapture(text);
+    if (
+      capture.candidate.length >= 4 &&
+      capture.candidate.length <= 8 &&
+      /[A-Z]/.test(capture.candidate) &&
+      /\d/.test(capture.candidate)
+    ) {
+      return {
+        value: capture.candidate,
+        confidence: capture.confidence,
+        needsConfirmation: capture.hasMergedTokens || capture.confidence < 0.9,
+      };
     }
 
     return null;
@@ -666,7 +723,11 @@ export class SemanticPatchService {
   private extractCustomerEmail(
     text: string,
     captureTarget: CaptureSlotKey,
-  ): string | null {
+  ): {
+    value: string;
+    confidence: number;
+    needsConfirmation: boolean;
+  } | null {
     const lower = text.toLowerCase();
     const explicit = /\b(email|e-mail|email address)\b/.test(lower);
     if (!explicit && captureTarget !== 'customerEmail') {
@@ -678,7 +739,15 @@ export class SemanticPatchService {
       /\b(?:contact email is|send it to)\b/gi,
     ]);
     const candidate = this.extractSpokenEmailCandidate(stripped);
-    return this.isEmailAddress(candidate) ? candidate : null;
+    if (!this.isEmailAddress(candidate)) {
+      return null;
+    }
+
+    return {
+      value: candidate,
+      confidence: explicit ? 0.92 : 0.88,
+      needsConfirmation: !explicit,
+    };
   }
 
   private extractDigitString(text: string, _aggressive = false): string {
@@ -717,7 +786,7 @@ export class SemanticPatchService {
       return 'customerName';
     }
 
-    const promptedSlot = session.conversation?.lastDecision?.slotKey;
+    const promptedSlot = session.conversation?.liveIntent.prompt.slotKey;
     if (
       promptedSlot === 'vehicleRegistration' ||
       promptedSlot === 'phoneNumber' ||
@@ -729,7 +798,7 @@ export class SemanticPatchService {
 
     const nextMissingActionSlot = profile.actionReadySlotKeys.find((slotKey) => {
       const slot = session.conversation?.liveIntent.slots[slotKey];
-      return !slot?.value;
+      return !slot?.value || slot.needsConfirmation || slot.status !== 'confirmed';
     });
 
     if (
@@ -743,19 +812,151 @@ export class SemanticPatchService {
     return null;
   }
 
-  private extractSpokenRegistrationCandidate(text: string): string {
+  private extractControlPatches(
+    session: SessionState,
+    profile: ConversationProfile,
+    text: string,
+    fragment: TranscriptFragment,
+  ): SemanticPatch[] {
+    if (profile.key !== 'car_booking_receptionist') {
+      return [];
+    }
+
+    const patches: SemanticPatch[] = [];
+    const prompt = session.conversation?.liveIntent.prompt;
+    const lower = text.trim().toLowerCase();
+
+    if (prompt?.action === 'confirm' && prompt.slotKey) {
+      if (this.isAffirmative(lower)) {
+        patches.push({
+          type: 'confirm_slot',
+          slotKey: prompt.slotKey,
+          at: fragment.receivedAt,
+        });
+      } else if (this.isNegative(lower)) {
+        patches.push({
+          type: 'clear_slot',
+          slotKey: prompt.slotKey,
+          at: fragment.receivedAt,
+        });
+      }
+    }
+
+    const correctedSlot = this.detectCorrectedSlot(session, text);
+    if (correctedSlot) {
+      patches.push({
+        type: 'clear_slot',
+        slotKey: correctedSlot,
+        at: fragment.receivedAt,
+      });
+    }
+
+    return patches;
+  }
+
+  private detectCorrectedSlot(
+    session: SessionState,
+    text: string,
+  ): CaptureSlotKey {
+    const lower = text.toLowerCase();
+
+    if (
+      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(rego|registration|plate)\b/.test(
+        lower,
+      )
+    ) {
+      return 'vehicleRegistration';
+    }
+    if (
+      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(phone|mobile|number)\b/.test(
+        lower,
+      )
+    ) {
+      return 'phoneNumber';
+    }
+    if (
+      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(email|e-mail)\b/.test(
+        lower,
+      )
+    ) {
+      return 'customerEmail';
+    }
+    if (
+      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(name)\b/.test(
+        lower,
+      )
+    ) {
+      return 'customerName';
+    }
+
+    if (this.isNegative(lower)) {
+      const promptSlot = session.conversation?.liveIntent.prompt.slotKey;
+      if (
+        promptSlot === 'vehicleRegistration' ||
+        promptSlot === 'phoneNumber' ||
+        promptSlot === 'customerEmail' ||
+        promptSlot === 'customerName'
+      ) {
+        return promptSlot;
+      }
+    }
+
+    return null;
+  }
+
+  private isAffirmative(text: string): boolean {
+    return /^(?:yes|yeah|yep|correct|that'?s right|that is right|right|exactly|affirmative|sure)$/i.test(
+      text.trim(),
+    );
+  }
+
+  private isNegative(text: string): boolean {
+    return /^(?:no|nope|nah|not correct|that'?s not correct|that is not correct|wrong|incorrect|not right)$/i.test(
+      text.trim(),
+    );
+  }
+
+  private isSlotControlUtterance(text: string): boolean {
+    const lower = text.toLowerCase().trim();
+    if (
+      /\b(confirm|check|repeat)\b.*\b(rego|registration|plate|phone|mobile|number|email|e-mail|name)\b/.test(
+        lower,
+      )
+    ) {
+      return true;
+    }
+
+    return (
+      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(rego|registration|plate|phone|mobile|number|email|e-mail|name)\b/.test(
+        lower,
+      ) || this.isAffirmative(lower) || this.isNegative(lower)
+    );
+  }
+
+  private extractSpokenRegistrationCapture(text: string): RegistrationCapture {
     const stripped = this.stripSlotLeadIn(text, [
       /\b(?:the\s+)?(?:vehicle\s+)?(?:registration|rego|plate)(?:\s+(?:is|number is))?\b/gi,
       /\b(?:it'?s|that is|thats)\b/gi,
     ]);
     const tokens = this.tokenizeCaptureInput(stripped);
-    const characters = tokens
-      .map((token) => this.normalizeCaptureToken(token, 'vehicleRegistration'))
-      .filter(Boolean)
+    const normalized = tokens
+      .map((token) => this.normalizeRegistrationToken(token))
+      .filter((token) => Boolean(token.output));
+    const candidate = normalized
+      .map((token) => token.output)
       .join('')
-      .replace(/[^A-Z0-9]/g, '');
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 8);
+    const confidence = normalized.length
+      ? normalized.reduce((sum, token) => sum + token.confidence, 0) /
+        normalized.length
+      : 0;
 
-    return characters.slice(0, 8);
+    return {
+      candidate,
+      confidence,
+      hasMergedTokens: normalized.some((token) => token.merged),
+    };
   }
 
   private looksLikeSpelledRegistration(text: string): boolean {
@@ -765,7 +966,7 @@ export class SemanticPatchService {
     const tokens = this.tokenizeCaptureInput(stripped);
     return tokens.some(
       (token) =>
-        Boolean(this.normalizeCaptureToken(token, 'vehicleRegistration')) ||
+        Boolean(this.normalizeRegistrationToken(token).output) ||
         /^[A-Za-z0-9-]+$/.test(token),
     );
   }
@@ -782,18 +983,35 @@ export class SemanticPatchService {
     return normalized;
   }
 
-  private extractSpelledNameCandidate(text: string): string {
+  private extractSpelledNameCapture(text: string): {
+    value: string;
+    confidence: number;
+    needsConfirmation: boolean;
+  } {
     const tokens = this.tokenizeCaptureInput(text);
-    const characters = tokens
-      .map((token) => this.normalizeCaptureToken(token, 'customerName'))
-      .filter(Boolean)
-      .join('');
+    const normalized = tokens
+      .map((token) => this.normalizeNameToken(token))
+      .filter((token) => Boolean(token.output));
+    const characters = normalized.map((token) => token.output).join('');
 
     if (!characters) {
-      return '';
+      return {
+        value: '',
+        confidence: 0,
+        needsConfirmation: false,
+      };
     }
 
-    return this.toTitleCase(characters);
+    const confidence = normalized.length
+      ? normalized.reduce((sum, token) => sum + token.confidence, 0) /
+        normalized.length
+      : 0;
+
+    return {
+      value: this.toTitleCase(characters),
+      confidence,
+      needsConfirmation: normalized.some((token) => token.merged),
+    };
   }
 
   private looksLikeSpelledName(text: string): boolean {
@@ -804,7 +1022,7 @@ export class SemanticPatchService {
     const tokens = this.tokenizeCaptureInput(stripped);
     return (
       tokens.length > 0 &&
-      tokens.every((token) => Boolean(this.normalizeCaptureToken(token, 'customerName')))
+      tokens.every((token) => Boolean(this.normalizeNameToken(token).output))
     );
   }
 
@@ -840,6 +1058,88 @@ export class SemanticPatchService {
       .trim()
       .split(' ')
       .filter(Boolean);
+  }
+
+  private normalizeRegistrationToken(token: string): NormalizedCaptureToken {
+    if (!token) {
+      return { output: '', confidence: 0, merged: false };
+    }
+
+    if (spokenLetterWords.has(token)) {
+      return {
+        output: spokenLetterWords.get(token) ?? '',
+        confidence: 0.98,
+        merged: false,
+      };
+    }
+
+    if (numberWords.has(token)) {
+      return {
+        output: numberWords.get(token) ?? '',
+        confidence: 0.96,
+        merged: false,
+      };
+    }
+
+    if (/^[a-z0-9]$/i.test(token)) {
+      return {
+        output: token.toUpperCase(),
+        confidence: 0.96,
+        merged: false,
+      };
+    }
+
+    const fuzzyRegistration = this.fuzzyNormalizeToken(token, 'vehicleRegistration');
+    if (fuzzyRegistration) {
+      return {
+        output: fuzzyRegistration.toUpperCase(),
+        confidence: fuzzyRegistration.length > 1 ? 0.78 : 0.84,
+        merged: fuzzyRegistration.length > 1,
+      };
+    }
+
+    if (/^[a-z0-9]{2,3}$/i.test(token)) {
+      return {
+        output: token.toUpperCase(),
+        confidence: token.length === 3 ? 0.82 : 0.76,
+        merged: true,
+      };
+    }
+
+    return { output: '', confidence: 0, merged: false };
+  }
+
+  private normalizeNameToken(token: string): NormalizedCaptureToken {
+    if (!token) {
+      return { output: '', confidence: 0, merged: false };
+    }
+
+    if (spokenLetterWords.has(token)) {
+      return {
+        output: (spokenLetterWords.get(token) ?? '').toLowerCase(),
+        confidence: 0.97,
+        merged: false,
+      };
+    }
+
+    if (/^[a-z]$/i.test(token)) {
+      return {
+        output: token.toLowerCase(),
+        confidence: 0.96,
+        merged: false,
+      };
+    }
+
+    const fuzzyName = this.fuzzyNormalizeToken(token, 'customerName');
+    if (fuzzyName) {
+      return {
+        output: fuzzyName.toLowerCase(),
+        confidence: fuzzyName.length > 1 ? 0.76 : 0.84,
+        merged: fuzzyName.length > 1,
+      };
+    }
+
+    return { output: '', confidence: 0, merged: false };
   }
 
   private normalizeCaptureToken(

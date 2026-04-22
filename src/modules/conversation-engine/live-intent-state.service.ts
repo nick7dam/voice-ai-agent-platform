@@ -42,6 +42,7 @@ export class LiveIntentStateService {
           canonicalValue: null,
           confidence: 0,
           status: 'missing',
+          needsConfirmation: false,
           updatedAt: null,
           sourceFragmentIds: [],
         } satisfies IntentSlotState,
@@ -71,6 +72,11 @@ export class LiveIntentStateService {
         status: 'idle',
         incompleteReason: null,
         holdUntil: null,
+      },
+      prompt: {
+        slotKey: null,
+        action: null,
+        updatedAt: null,
       },
       latestCommittedThought: null,
     };
@@ -118,6 +124,7 @@ export class LiveIntentStateService {
               canonicalValue: null,
               confidence: 0,
               status: 'missing',
+              needsConfirmation: false,
               updatedAt: null,
               sourceFragmentIds: [],
             } satisfies IntentSlotState);
@@ -135,10 +142,52 @@ export class LiveIntentStateService {
               patch.status === 'confirmed' && isCorrection
                 ? 'corrected'
                 : patch.status,
+            needsConfirmation: patch.needsConfirmation ?? current.needsConfirmation,
             updatedAt: patch.at,
             sourceFragmentIds: [
               ...new Set([...current.sourceFragmentIds, patch.fragmentId]),
             ],
+          };
+          break;
+        }
+        case 'clear_slot': {
+          const current =
+            state.slots[patch.slotKey] ??
+            ({
+              key: patch.slotKey,
+              label: patch.slotKey,
+              value: null,
+              canonicalValue: null,
+              confidence: 0,
+              status: 'missing',
+              needsConfirmation: false,
+              updatedAt: null,
+              sourceFragmentIds: [],
+            } satisfies IntentSlotState);
+
+          state.slots[patch.slotKey] = {
+            ...current,
+            value: null,
+            canonicalValue: null,
+            confidence: 0,
+            status: 'missing',
+            needsConfirmation: false,
+            updatedAt: patch.at,
+            sourceFragmentIds: [],
+          };
+          break;
+        }
+        case 'confirm_slot': {
+          const current = state.slots[patch.slotKey];
+          if (!current?.value) {
+            break;
+          }
+
+          state.slots[patch.slotKey] = {
+            ...current,
+            status: 'confirmed',
+            needsConfirmation: false,
+            updatedAt: patch.at,
           };
           break;
         }
@@ -169,6 +218,14 @@ export class LiveIntentStateService {
           };
           break;
         }
+        case 'set_prompt': {
+          state.prompt = {
+            slotKey: patch.slotKey,
+            action: patch.action,
+            updatedAt: patch.at,
+          };
+          break;
+        }
       }
     }
 
@@ -195,11 +252,30 @@ export class LiveIntentStateService {
         slot.status === 'provisional' &&
         slot.sourceFragmentIds.some((fragmentId) => pendingFragmentIds.has(fragmentId))
       ) {
-        slot.status = 'confirmed';
+        const shouldAutoConfirm =
+          slot.confidence >= this.getAutoConfirmThreshold(slotKey) &&
+          !slot.needsConfirmation;
+
+        slot.status = shouldAutoConfirm ? 'confirmed' : 'provisional';
         slot.updatedAt = nowIso();
       }
     }
 
     return state;
+  }
+
+  private getAutoConfirmThreshold(slotKey: string): number {
+    switch (slotKey) {
+      case 'vehicleRegistration':
+        return 0.96;
+      case 'phoneNumber':
+        return 0.94;
+      case 'customerEmail':
+        return 0.96;
+      case 'customerName':
+        return 0.88;
+      default:
+        return 0.7;
+    }
   }
 }
