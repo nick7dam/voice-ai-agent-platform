@@ -39,7 +39,7 @@ PORT = int(os.getenv("VOICE_GATEWAY_PORT", "8004"))
 NEST_WS_URL = os.getenv("NEST_WS_URL", "ws://127.0.0.1:3000/realtime")
 DEFAULT_TASK_KEY = os.getenv("DEFAULT_TASK_KEY", "general_voice_assistant")
 
-STT_MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "Systran/faster-distil-whisper-large-v3")
+STT_MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "distil-whisper/distil-large-v3.5-ct2")
 STT_DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_STT_COMPUTE_TYPE = "float16" if STT_DEVICE == "cuda" else "int8"
 STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)

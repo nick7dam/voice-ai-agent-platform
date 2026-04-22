@@ -4,7 +4,7 @@ This guide is for a fresh GPU VM running the cleaned WebRTC stack:
 
 Browser
 -> WebRTC gateway
--> faster-whisper `Systran/faster-distil-whisper-large-v3`
+-> faster-whisper `distil-whisper/distil-large-v3.5-ct2`
 -> NestJS
 -> Ollama
 -> Qwen3-TTS `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`

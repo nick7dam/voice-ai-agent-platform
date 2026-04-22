@@ -10,7 +10,7 @@ It owns the realtime voice path:
 
 - browser WebRTC audio input
 - VAD and turn detection
-- faster-whisper STT with `Systran/faster-distil-whisper-large-v3`
+- faster-whisper STT with `distil-whisper/distil-large-v3.5-ct2`
 - Nest `/realtime` control websocket
 - Qwen3-TTS streaming CustomVoice with `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
 - browser WebRTC audio output
@@ -46,7 +46,7 @@ NEST_WS_URL=ws://127.0.0.1:3000/realtime
 ## Models
 
 ```bash
-LOCAL_STT_MODEL=Systran/faster-distil-whisper-large-v3
+LOCAL_STT_MODEL=distil-whisper/distil-large-v3.5-ct2
 LOCAL_QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 LOCAL_QWEN_TTS_SPEAKER=aiden
 LOCAL_QWEN_TTS_STREAM_CHUNK_SIZE=4

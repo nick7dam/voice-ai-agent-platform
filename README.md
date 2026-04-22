@@ -20,7 +20,7 @@ The project intentionally does not include Groq providers, Laravel booking tools
 
 ## Kept Components
 
-- STT: `Systran/faster-distil-whisper-large-v3` through `faster-whisper`.
+- STT: `distil-whisper/distil-large-v3.5-ct2` through `faster-whisper`.
 - Reasoning: Ollama `/api/chat`, defaulting to `qwen3:8b`.
 - TTS: `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` with streaming PCM chunks.
 - Transport: browser WebRTC plus a small Nest websocket used only between the Python gateway and Nest.

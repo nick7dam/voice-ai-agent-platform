@@ -21,7 +21,9 @@ export class HealthController {
       },
       stt: {
         provider: 'faster_whisper',
-        model: 'Systran/faster-distil-whisper-large-v3',
+        model:
+          process.env.LOCAL_STT_MODEL ??
+          'distil-whisper/distil-large-v3.5-ct2',
         location: 'webrtc_voice_gateway',
       },
       reasoning: {
