@@ -79,7 +79,15 @@ export class ConversationEngineService {
       return null;
     }
 
-    this.liveIntent.promotePendingThoughtSlots(session, profile);
+    const committedPatches = this.semanticPatches.buildCommittedThoughtPatches(
+      session,
+      profile,
+      pendingThought,
+    );
+    if (committedPatches.length) {
+      this.liveIntent.applyPatches(session, committedPatches);
+    }
+
     const decision = this.policy.evaluateCommittedThought(session, profile);
     const liveIntent = this.liveIntent.applyPatches(session, [
       {

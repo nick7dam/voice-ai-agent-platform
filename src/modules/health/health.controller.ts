@@ -20,10 +20,10 @@ export class HealthController {
         controlWebSocketPath: this.config.wsPath,
       },
       stt: {
-        provider: 'faster_whisper',
+        provider: process.env.LOCAL_STT_BACKEND ?? 'qwen_asr',
         model:
           process.env.LOCAL_STT_MODEL ??
-          'distil-whisper/distil-large-v3.5-ct2',
+          'Qwen/Qwen3-ASR-0.6B',
         location: 'webrtc_voice_gateway',
       },
       reasoning: {
@@ -39,7 +39,7 @@ export class HealthController {
         model:
           process.env.LOCAL_QWEN_TTS_MODEL ??
           'Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice',
-        speaker: process.env.LOCAL_QWEN_TTS_SPEAKER ?? 'aiden',
+        speaker: process.env.LOCAL_QWEN_TTS_SPEAKER ?? 'Aiden',
         streamingChunkSize: process.env.LOCAL_QWEN_TTS_STREAM_CHUNK_SIZE ?? '4',
         location: 'webrtc_voice_gateway',
       },

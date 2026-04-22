@@ -24,8 +24,8 @@ const genericProfile: ConversationProfile = {
   key: 'generic',
   intentName: 'general_assistance',
   description: 'General spoken assistant flow without task-specific slot logic.',
-  defaultHoldMs: 150,
-  incompleteHoldMs: 400,
+  defaultHoldMs: 120,
+  incompleteHoldMs: 250,
   slotOrder: [],
   actionReadySlotKeys: [],
   slotDefinitions: {},
@@ -36,8 +36,8 @@ const carBookingReceptionistProfile: ConversationProfile = {
   intentName: 'service_booking',
   description:
     'Collect the minimum details needed for a vehicle service booking while staying concise and spoken.',
-  defaultHoldMs: 200,
-  incompleteHoldMs: 600,
+  defaultHoldMs: 180,
+  incompleteHoldMs: 300,
   slotOrder: [
     'serviceType',
     'vehicleRegistration',

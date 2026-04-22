@@ -24,7 +24,6 @@ from aiortc import (
 )
 from av import AudioFrame
 from av.audio.resampler import AudioResampler
-from faster_whisper import WhisperModel
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -39,7 +38,8 @@ PORT = int(os.getenv("VOICE_GATEWAY_PORT", "8004"))
 NEST_WS_URL = os.getenv("NEST_WS_URL", "ws://127.0.0.1:3000/realtime")
 DEFAULT_TASK_KEY = os.getenv("DEFAULT_TASK_KEY", "general_voice_assistant")
 
-STT_MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "distil-whisper/distil-large-v3.5-ct2")
+STT_BACKEND = os.getenv("LOCAL_STT_BACKEND", "qwen_asr").strip().lower()
+STT_MODEL_NAME = os.getenv("LOCAL_STT_MODEL", "Qwen/Qwen3-ASR-0.6B")
 STT_DEVICE = os.getenv("LOCAL_STT_DEVICE", "cpu")
 DEFAULT_STT_COMPUTE_TYPE = "float16" if STT_DEVICE == "cuda" else "int8"
 STT_COMPUTE_TYPE = os.getenv("LOCAL_STT_COMPUTE_TYPE", DEFAULT_STT_COMPUTE_TYPE)
@@ -49,6 +49,11 @@ STT_BEAM_SIZE = max(1, int(os.getenv("LOCAL_STT_BEAM_SIZE", "2")))
 STT_BEST_OF = max(1, int(os.getenv("LOCAL_STT_BEST_OF", str(STT_BEAM_SIZE))))
 STT_INITIAL_PROMPT = os.getenv("LOCAL_STT_INITIAL_PROMPT", "").strip() or None
 STT_HOTWORDS = os.getenv("LOCAL_STT_HOTWORDS", "").strip() or None
+STT_QWEN_DTYPE = os.getenv("LOCAL_STT_QWEN_DTYPE", "").strip().lower()
+STT_QWEN_MAX_NEW_TOKENS = max(
+    32, int(os.getenv("LOCAL_STT_QWEN_MAX_NEW_TOKENS", "256"))
+)
+STT_QWEN_USE_FLASH_ATTN = env_bool("LOCAL_STT_QWEN_USE_FLASH_ATTN", False)
 
 TTS_PROVIDER = "qwen3_tts"
 TTS_DEVICE = os.getenv("LOCAL_TTS_DEVICE", "auto").lower()
@@ -70,7 +75,7 @@ QWEN_TTS_MODEL_NAME = os.getenv(
     "LOCAL_QWEN_TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 )
 QWEN_TTS_LANGUAGE = os.getenv("LOCAL_QWEN_TTS_LANGUAGE", "English").strip() or "Auto"
-QWEN_TTS_SPEAKER = os.getenv("LOCAL_QWEN_TTS_SPEAKER", "aiden").strip()
+QWEN_TTS_SPEAKER = os.getenv("LOCAL_QWEN_TTS_SPEAKER", "Aiden").strip()
 QWEN_TTS_INSTRUCT = os.getenv("LOCAL_QWEN_TTS_INSTRUCT", "").strip() or None
 QWEN_TTS_DTYPE = os.getenv("LOCAL_QWEN_TTS_DTYPE", "bfloat16").strip().lower()
 QWEN_TTS_ATTN_IMPLEMENTATION = os.getenv(
@@ -174,7 +179,8 @@ WEBRTC_SERVER_USE_BROWSER_ICE = env_bool("WEBRTC_SERVER_USE_BROWSER_ICE", False)
 logging.basicConfig(level=os.getenv("VOICE_GATEWAY_LOG_LEVEL", "INFO").upper())
 logger = logging.getLogger("webrtc_voice_gateway")
 
-whisper_model: Optional[WhisperModel] = None
+whisper_model: Optional[Any] = None
+qwen_asr_model: Optional[Any] = None
 qwen_tts_model: Optional[Any] = None
 
 
@@ -298,9 +304,25 @@ def elapsed_ms(started_at: float) -> int:
     return int((time.perf_counter() - started_at) * 1000)
 
 
-def get_whisper_model() -> WhisperModel:
+def resolve_stt_backend() -> str:
+    if STT_BACKEND in {"qwen_asr", "faster_whisper"}:
+        return STT_BACKEND
+
+    logger.warning("voice.stt.invalid_backend value=%s", STT_BACKEND)
+    return "qwen_asr"
+
+
+def get_whisper_model() -> Any:
     global whisper_model
     if whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as exc:
+            raise RuntimeError(
+                "LOCAL_STT_BACKEND=faster_whisper requires the faster-whisper package "
+                "to be installed in the voice gateway environment."
+            ) from exc
+
         started_at = time.perf_counter()
         whisper_model = WhisperModel(
             STT_MODEL_NAME,
@@ -315,6 +337,86 @@ def get_whisper_model() -> WhisperModel:
             elapsed_ms(started_at),
         )
     return whisper_model
+
+
+def resolve_qwen_asr_dtype() -> torch.dtype:
+    raw = STT_QWEN_DTYPE or ("bfloat16" if STT_DEVICE == "cuda" else "float32")
+    if raw in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if raw in {"fp16", "float16", "half"}:
+        return torch.float16
+    if raw in {"fp32", "float32"}:
+        return torch.float32
+    raise RuntimeError(
+        "LOCAL_STT_QWEN_DTYPE must be one of: bfloat16, float16, float32"
+    )
+
+
+def resolve_qwen_asr_language() -> Optional[str]:
+    if not STT_LANGUAGE:
+        return None
+
+    normalized = STT_LANGUAGE.strip().lower()
+    aliases = {
+        "en": "English",
+        "english": "English",
+        "zh": "Chinese",
+        "chinese": "Chinese",
+        "yue": "Cantonese",
+        "cantonese": "Cantonese",
+        "de": "German",
+        "german": "German",
+        "fr": "French",
+        "french": "French",
+        "es": "Spanish",
+        "spanish": "Spanish",
+        "it": "Italian",
+        "italian": "Italian",
+        "pt": "Portuguese",
+        "portuguese": "Portuguese",
+        "ja": "Japanese",
+        "japanese": "Japanese",
+        "ko": "Korean",
+        "korean": "Korean",
+    }
+    return aliases.get(normalized, STT_LANGUAGE)
+
+
+def get_qwen_asr_model() -> Any:
+    global qwen_asr_model
+    if qwen_asr_model is None:
+        try:
+            from qwen_asr import Qwen3ASRModel
+        except Exception as exc:
+            raise RuntimeError(
+                "LOCAL_STT_BACKEND=qwen_asr requires the qwen-asr package to be "
+                "installed in the voice gateway environment."
+            ) from exc
+
+        started_at = time.perf_counter()
+        model_kwargs: Dict[str, Any] = {
+            "dtype": resolve_qwen_asr_dtype(),
+            "device_map": "cuda:0" if STT_DEVICE == "cuda" else STT_DEVICE,
+            "max_inference_batch_size": 1,
+            "max_new_tokens": STT_QWEN_MAX_NEW_TOKENS,
+        }
+        if STT_QWEN_USE_FLASH_ATTN and STT_DEVICE == "cuda":
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+
+        qwen_asr_model = Qwen3ASRModel.from_pretrained(
+            STT_MODEL_NAME,
+            **model_kwargs,
+        )
+        logger.info(
+            "voice.stt.loaded backend=%s model=%s device=%s dtype=%s latencyMs=%d",
+            resolve_stt_backend(),
+            STT_MODEL_NAME,
+            STT_DEVICE,
+            resolve_qwen_asr_dtype(),
+            elapsed_ms(started_at),
+        )
+
+    return qwen_asr_model
 
 
 def resolve_tts_device() -> str:
@@ -753,8 +855,23 @@ def transcribe_samples(
     hotwords: Optional[str] = None,
 ) -> Tuple[str, int]:
     started_at = time.perf_counter()
-    temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
+    backend = resolve_stt_backend()
 
+    if backend == "qwen_asr":
+        results = get_qwen_asr_model().transcribe(
+            audio=(samples.astype(np.float32, copy=False), INPUT_SAMPLE_RATE),
+            language=resolve_qwen_asr_language(),
+        )
+        first = results[0] if results else None
+        text = ""
+        if first is not None:
+            if hasattr(first, "text"):
+                text = str(first.text).strip()
+            elif isinstance(first, dict):
+                text = str(first.get("text") or "").strip()
+        return text, elapsed_ms(started_at)
+
+    temp_path = write_wav_temp(samples, INPUT_SAMPLE_RATE)
     try:
         segments, _ = get_whisper_model().transcribe(
             str(temp_path),
@@ -2628,7 +2745,11 @@ async def handle_signaling(websocket: Any, _path: Optional[str] = None) -> None:
 
 def preload_stt_model() -> None:
     started_at = time.perf_counter()
-    get_whisper_model()
+    backend = resolve_stt_backend()
+    if backend == "qwen_asr":
+        get_qwen_asr_model()
+    else:
+        get_whisper_model()
     logger.info("voice.stt.preload.end latencyMs=%d", elapsed_ms(started_at))
 
 

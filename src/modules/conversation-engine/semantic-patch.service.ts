@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+  DialogueAction,
   SemanticPatch,
   TranscriptFragment,
 } from '../../common/types/conversation.types';
@@ -27,28 +28,51 @@ type CaptureSlotKey =
   | 'vehicleRegistration'
   | 'phoneNumber'
   | 'customerEmail'
-  | 'customerName'
-  | null;
+  | 'customerName';
+
+type PromptContext = {
+  slotKey: CaptureSlotKey | null;
+  action: DialogueAction | null;
+};
+
+type ExtractedSlotValue = {
+  slotKey: string;
+  value: string;
+  canonicalValue?: string | null;
+  confidence: number;
+  needsConfirmation?: boolean;
+};
 
 const numberWords = new Map<string, string>([
   ['zero', '0'],
   ['oh', '0'],
   ['o', '0'],
-  ['won', '1'],
   ['one', '1'],
+  ['won', '1'],
+  ['two', '2'],
   ['to', '2'],
   ['too', '2'],
-  ['two', '2'],
   ['three', '3'],
+  ['four', '4'],
   ['for', '4'],
   ['fore', '4'],
-  ['four', '4'],
   ['five', '5'],
   ['six', '6'],
   ['seven', '7'],
-  ['ate', '8'],
   ['eight', '8'],
+  ['ate', '8'],
   ['nine', '9'],
+]);
+
+const looseNumberAliases = new Set([
+  'o',
+  'oh',
+  'won',
+  'to',
+  'too',
+  'for',
+  'fore',
+  'ate',
 ]);
 
 const spokenLetterWords = new Map<string, string>([
@@ -84,15 +108,14 @@ const spokenLetterWords = new Map<string, string>([
   ['em', 'M'],
   ['n', 'N'],
   ['en', 'N'],
-  ['o', 'O'],
   ['p', 'P'],
   ['pee', 'P'],
   ['q', 'Q'],
   ['cue', 'Q'],
   ['queue', 'Q'],
   ['r', 'R'],
-  ['are', 'R'],
   ['ar', 'R'],
+  ['are', 'R'],
   ['s', 'S'],
   ['ess', 'S'],
   ['t', 'T'],
@@ -103,16 +126,16 @@ const spokenLetterWords = new Map<string, string>([
   ['v', 'V'],
   ['vee', 'V'],
   ['w', 'W'],
-  ['doubleyou', 'W'],
   ['doubleu', 'W'],
+  ['doubleyou', 'W'],
   ['x', 'X'],
   ['ex', 'X'],
   ['y', 'Y'],
   ['why', 'Y'],
   ['wye', 'Y'],
   ['z', 'Z'],
-  ['zee', 'Z'],
   ['zed', 'Z'],
+  ['zee', 'Z'],
 ]);
 
 const emailSymbolWords = new Map<string, string>([
@@ -121,213 +144,124 @@ const emailSymbolWords = new Map<string, string>([
   ['period', '.'],
   ['point', '.'],
   ['underscore', '_'],
-  ['under score', '_'],
   ['dash', '-'],
   ['hyphen', '-'],
   ['minus', '-'],
   ['plus', '+'],
 ]);
 
-interface CaptureUnit {
-  output: string;
-  spoken: string;
-}
-
-interface ExtractedSlotValue {
-  slotKey: string;
-  value: string;
-  canonicalValue?: string | null;
-  confidence: number;
-  needsConfirmation?: boolean;
-}
-
-interface NormalizedCaptureToken {
-  output: string;
-  confidence: number;
-  merged: boolean;
-}
-
-interface RegistrationCapture {
-  candidate: string;
-  confidence: number;
-  hasMergedTokens: boolean;
-}
-
-const letterCaptureUnits: CaptureUnit[] = [
-  ['A', 'ay'],
-  ['B', 'bee'],
-  ['C', 'see'],
-  ['D', 'dee'],
-  ['E', 'ee'],
-  ['F', 'ef'],
-  ['G', 'gee'],
-  ['H', 'aitch'],
-  ['I', 'eye'],
-  ['J', 'jay'],
-  ['K', 'kay'],
-  ['L', 'el'],
-  ['M', 'em'],
-  ['N', 'en'],
-  ['O', 'oh'],
-  ['P', 'pee'],
-  ['Q', 'cue'],
-  ['R', 'ar'],
-  ['S', 'ess'],
-  ['T', 'tee'],
-  ['U', 'you'],
-  ['V', 'vee'],
-  ['W', 'doubleu'],
-  ['X', 'ex'],
-  ['Y', 'why'],
-  ['Z', 'zed'],
-].map(([output, spoken]) => ({ output, spoken }));
-
-const digitCaptureUnits: CaptureUnit[] = [
-  ['0', 'zero'],
-  ['1', 'one'],
-  ['2', 'two'],
-  ['3', 'three'],
-  ['4', 'four'],
-  ['5', 'five'],
-  ['6', 'six'],
-  ['7', 'seven'],
-  ['8', 'eight'],
-  ['9', 'nine'],
-].map(([output, spoken]) => ({ output, spoken }));
-
-const emailCaptureUnits: CaptureUnit[] = [
-  ...letterCaptureUnits.map((unit) => ({
-    output: unit.output.toLowerCase(),
-    spoken: unit.spoken,
-  })),
-  ...digitCaptureUnits,
-  { output: '@', spoken: 'at' },
-  { output: '.', spoken: 'dot' },
-  { output: '_', spoken: 'underscore' },
-  { output: '-', spoken: 'dash' },
-  { output: '+', spoken: 'plus' },
-];
-
-const registrationMergedUnits = buildMergedUnits(
-  [...letterCaptureUnits, ...digitCaptureUnits],
-  (left, right) => /\d/.test(left.output) || /\d/.test(right.output),
-);
-
-const nameMergedUnits = buildMergedUnits(letterCaptureUnits, () => true);
-
-function buildMergedUnits(
-  units: CaptureUnit[],
-  include: (left: CaptureUnit, right: CaptureUnit) => boolean,
-): CaptureUnit[] {
-  const merged: CaptureUnit[] = [];
-  for (const left of units) {
-    for (const right of units) {
-      if (!include(left, right)) {
-        continue;
-      }
-      merged.push({
-        output: `${left.output}${right.output}`,
-        spoken: `${left.spoken}${right.spoken}`,
-      });
-    }
-  }
-  return merged;
-}
+const affirmativePattern =
+  /\b(yes|yeah|yep|correct|that(?:'s| is) right|sounds right|sure|exactly)\b/i;
+const negativePattern =
+  /\b(no|nope|not correct|not right|wrong|incorrect|not entirely|that's wrong|that is wrong)\b/i;
+const fillerPattern =
+  /^(uh|um|hmm|erm|ah|mm|sorry|let me think|one sec|one second|hold on|wait)$/i;
 
 @Injectable()
 export class SemanticPatchService {
   buildPatches(
-    session: SessionState,
+    _session: SessionState,
     profile: ConversationProfile,
     fragment: TranscriptFragment,
   ): SemanticPatch[] {
-    const now = nowIso();
-    const existingThought =
-      session.conversation?.liveIntent.pendingThought.text ?? '';
-    const combinedThought = [existingThought, fragment.normalizedText]
-      .filter(Boolean)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const promptContext = this.resolvePromptContext(session);
-    const captureTarget = this.resolveCaptureTarget(
-      session,
-      profile,
-      combinedThought,
-      promptContext,
-    );
-    const incompleteReason = this.detectIncompleteThought(
-      session,
-      profile,
-      combinedThought,
-      captureTarget,
-    );
+    const text = fragment.normalizedText;
+    const substantive = this.hasSubstantiveContent(text);
 
     const patches: SemanticPatch[] = [
       {
         type: 'append_thought_fragment',
         fragmentId: fragment.id,
-        text: fragment.normalizedText,
+        text,
         at: fragment.receivedAt,
       },
       {
         type: 'set_floor',
         state: 'user_thinking',
-        stability: incompleteReason ? 0.28 : 0.62,
+        stability: substantive ? 0.72 : 0.3,
         at: fragment.receivedAt,
       },
       {
         type: 'mark_pending_thought',
-        status: incompleteReason ? 'forming' : 'ready',
-        incompleteReason,
+        status: substantive ? 'ready' : 'forming',
+        incompleteReason: substantive ? null : 'filler_only',
         holdUntil: null,
       },
     ];
 
-    patches.push(
-      ...this.extractControlPatches(
-        session,
-        profile,
-        combinedThought,
-        fragment,
-        promptContext,
-      ),
-    );
-
-    if (profile.key === 'generic') {
-      return patches;
-    }
-
-    if (this.hasSubstantiveContent(combinedThought)) {
+    if (profile.key === 'car_booking_receptionist' && substantive) {
       patches.push({
         type: 'set_intent',
         intentName: profile.intentName,
-        confidence: 0.86,
-        status: incompleteReason ? 'forming' : 'usable',
+        confidence: 0.72,
+        status: 'forming',
         fragmentId: fragment.id,
+        at: fragment.receivedAt,
+      });
+    }
+
+    return patches;
+  }
+
+  buildCommittedThoughtPatches(
+    session: SessionState,
+    profile: ConversationProfile,
+    committedText: string,
+  ): SemanticPatch[] {
+    if (profile.key === 'generic') {
+      return [];
+    }
+
+    const now = nowIso();
+    const patches: SemanticPatch[] = [];
+    const promptContext = this.resolvePromptContext(session);
+    const normalizedText = committedText.replace(/\s+/g, ' ').trim();
+    const lower = normalizedText.toLowerCase();
+
+    if (
+      promptContext.slotKey &&
+      promptContext.action === 'confirm' &&
+      affirmativePattern.test(lower)
+    ) {
+      patches.push({
+        type: 'confirm_slot',
+        slotKey: promptContext.slotKey,
+        at: now,
+      });
+    } else if (
+      promptContext.slotKey &&
+      promptContext.action === 'confirm' &&
+      negativePattern.test(lower)
+    ) {
+      patches.push({
+        type: 'clear_slot',
+        slotKey: promptContext.slotKey,
         at: now,
       });
     }
 
-    if (this.isSlotControlUtterance(combinedThought)) {
-      return patches;
+    if (!this.isPureConfirmationReply(lower)) {
+      for (const slot of this.extractCarBookingSlots(session, normalizedText, promptContext)) {
+        patches.push({
+          type: 'upsert_slot',
+          slotKey: slot.slotKey,
+          value: slot.value,
+          canonicalValue: slot.canonicalValue,
+          confidence: slot.confidence,
+          status: slot.needsConfirmation ? 'provisional' : 'confirmed',
+          needsConfirmation: slot.needsConfirmation,
+          fragmentId: `commit:${session.id}:${now}`,
+          at: now,
+        });
+      }
     }
 
-    const slotUpdates = this.extractCarBookingSlots(
-      session,
-      combinedThought,
-      captureTarget,
-    );
-    for (const slotUpdate of slotUpdates) {
+    if (this.hasBookingSignal(normalizedText, patches)) {
       patches.push({
-        type: 'upsert_slot',
-        slotKey: slotUpdate.slotKey,
-        value: slotUpdate.value,
-        canonicalValue: slotUpdate.canonicalValue,
-        confidence: slotUpdate.confidence,
-        status: 'provisional',
-        needsConfirmation: slotUpdate.needsConfirmation,
-        fragmentId: fragment.id,
+        type: 'set_intent',
+        intentName: profile.intentName,
+        confidence: 0.88,
+        status: 'usable',
+        fragmentId: `commit:${session.id}:${now}`,
         at: now,
       });
     }
@@ -336,126 +270,101 @@ export class SemanticPatchService {
   }
 
   private hasSubstantiveContent(text: string): boolean {
-    const lower = text.trim().toLowerCase();
-    if (!lower) {
-      return false;
-    }
-
-    return !/^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait)$/i.test(
-      lower,
-    );
+    const normalized = text.trim();
+    return Boolean(normalized) && !fillerPattern.test(normalized);
   }
 
-  private detectIncompleteThought(
-    session: SessionState,
-    profile: ConversationProfile,
-    text: string,
-    captureTarget: CaptureSlotKey,
-  ): string | null {
-    const lower = text.trim().toLowerCase();
-    if (!lower) {
-      return 'empty';
+  private isPureConfirmationReply(lower: string): boolean {
+    const normalized = lower.replace(/[.!?]/g, '').trim();
+    if (!normalized) {
+      return true;
     }
 
+    const genericReplies = [
+      'yes',
+      'yeah',
+      'yep',
+      'correct',
+      'sure',
+      'exactly',
+      'no',
+      'nope',
+      'not correct',
+      'not right',
+      'wrong',
+      'incorrect',
+      'not entirely',
+      "that's wrong",
+      'that is wrong',
+    ];
+
+    return genericReplies.includes(normalized);
+  }
+
+  private resolvePromptContext(session: SessionState): PromptContext {
+    const prompt = session.conversation?.liveIntent.prompt;
     if (
-      /^(uh|um|hmm|erm|let me think|one sec|one second|hold on|wait|sorry)$/i.test(
+      prompt?.slotKey &&
+      (prompt.slotKey === 'vehicleRegistration' ||
+        prompt.slotKey === 'phoneNumber' ||
+        prompt.slotKey === 'customerEmail' ||
+        prompt.slotKey === 'customerName')
+    ) {
+      return {
+        slotKey: prompt.slotKey,
+        action: prompt.action,
+      };
+    }
+
+    const assistantText =
+      session.assistantDraftTurn?.text ??
+      session.interruptedAssistantTurn?.text ??
+      '';
+    const lower = assistantText.toLowerCase();
+    const action: DialogueAction | null =
+      /\b(is that right|is that correct|did i get that right|please confirm)\b/.test(
         lower,
       )
-    ) {
-      return 'filler_only';
+        ? 'confirm'
+        : /\b(?:what is|can i get|what day|what time|would you like to add)\b/.test(
+              lower,
+            )
+          ? 'ask'
+          : null;
+
+    if (/\b(rego|registration|plate)\b/.test(lower)) {
+      return { slotKey: 'vehicleRegistration', action };
+    }
+    if (/\b(phone|mobile|number)\b/.test(lower)) {
+      return { slotKey: 'phoneNumber', action };
+    }
+    if (/\b(email|e-mail)\b/.test(lower)) {
+      return { slotKey: 'customerEmail', action };
+    }
+    if (/\bname\b/.test(lower)) {
+      return { slotKey: 'customerName', action };
     }
 
-    if (
-      /\b(in|on|for|with|about|to|from|at|my|the|a|an|and|or|but|because|if|when|tomorrow|today)$/.test(
+    return {
+      slotKey: null,
+      action: null,
+    };
+  }
+
+  private hasBookingSignal(text: string, patches: SemanticPatch[]): boolean {
+    const lower = text.toLowerCase();
+    return (
+      /\b(book|booking|service|rego|registration|oil change|logbook|phone|email)\b/.test(
         lower,
-      )
-    ) {
-      return 'open_ended_phrase';
-    }
-
-    if (
-      /\b(my name is|this is|i am|i'm|rego is|registration is|phone is|number is)\s*$/i.test(
-        lower,
-      )
-    ) {
-      return 'slot_value_incomplete';
-    }
-
-    const digits = this.extractDigitString(lower);
-    if (
-      /\b(phone|mobile|number)\b/.test(lower) &&
-      digits.length > 0 &&
-      digits.length < 10
-    ) {
-      return 'phone_incomplete';
-    }
-
-    if (
-      /\b(rego|registration|plate)\b/.test(lower) &&
-      !this.extractRegistration(session, lower, 'vehicleRegistration')
-    ) {
-      return 'registration_incomplete';
-    }
-
-    if (captureTarget === 'vehicleRegistration') {
-      const candidate = this.extractSpokenRegistrationCapture(text).candidate;
-      if (candidate && candidate.length < 4) {
-        return 'registration_capture_incomplete';
-      }
-      if (!candidate && this.looksLikeSpelledRegistration(text)) {
-        return 'registration_capture_incomplete';
-      }
-    }
-
-    if (captureTarget === 'phoneNumber') {
-      const digits = this.extractDigitString(text.toLowerCase(), true);
-      if (digits.length > 0 && digits.length < 8) {
-        return 'phone_capture_incomplete';
-      }
-    }
-
-    if (captureTarget === 'customerEmail') {
-      const emailCandidate = this.extractSpokenEmailCandidate(text);
-      if (emailCandidate && !this.isEmailAddress(emailCandidate)) {
-        return 'email_capture_incomplete';
-      }
-      if (
-        !emailCandidate &&
-        /\b(email|at|dot|underscore|dash|hyphen)\b/i.test(text)
-      ) {
-        return 'email_capture_incomplete';
-      }
-    }
-
-    if (
-      captureTarget === 'customerName' &&
-      this.looksLikeSpelledName(text) &&
-      this.extractSpelledNameCapture(text).value.length < 2
-    ) {
-      return 'name_capture_incomplete';
-    }
-
-    const wordCount = lower.split(/\s+/).filter(Boolean).length;
-    if (wordCount <= 3) {
-      return 'short_thought_likely_continuing';
-    }
-
-    if (
-      profile.key === 'car_booking_receptionist' &&
-      /\b(book|booking|service|repair|inspection|oil change)\b/.test(lower) &&
-      wordCount <= 6 &&
-      !/[.!?]$/.test(lower)
-    ) {
-      return 'service_request_still_forming';
-    }
-
-    return null;
+      ) ||
+      patches.some((patch) => patch.type === 'upsert_slot')
+    );
   }
 
   private extractCarBookingSlots(
     session: SessionState,
     text: string,
-    captureTarget: CaptureSlotKey,
+    promptContext: PromptContext,
   ): ExtractedSlotValue[] {
     const updates: ExtractedSlotValue[] = [];
 
@@ -465,11 +374,11 @@ export class SemanticPatchService {
         slotKey: 'serviceType',
         value: serviceType.label,
         canonicalValue: serviceType.key,
-        confidence: 0.92,
+        confidence: 0.94,
       });
     }
 
-    const registration = this.extractRegistration(session, text, captureTarget);
+    const registration = this.extractRegistration(text, promptContext.slotKey === 'vehicleRegistration');
     if (registration) {
       updates.push({
         slotKey: 'vehicleRegistration',
@@ -480,36 +389,35 @@ export class SemanticPatchService {
       });
     }
 
-    const name = this.extractCustomerName(text, captureTarget);
+    const name = this.extractCustomerName(text, promptContext.slotKey === 'customerName');
     if (name) {
       updates.push({
         slotKey: 'customerName',
         value: name.value,
         canonicalValue: name.value,
         confidence: name.confidence,
-        needsConfirmation: name.needsConfirmation,
       });
     }
 
-    const phoneNumber = this.extractPhoneNumber(session, text, captureTarget);
-    if (phoneNumber) {
+    const phone = this.extractPhoneNumber(text, promptContext.slotKey === 'phoneNumber');
+    if (phone) {
       updates.push({
         slotKey: 'phoneNumber',
-        value: phoneNumber.display,
-        canonicalValue: phoneNumber.canonical,
-        confidence: phoneNumber.confidence,
-        needsConfirmation: phoneNumber.needsConfirmation,
+        value: phone.display,
+        canonicalValue: phone.canonical,
+        confidence: phone.confidence,
+        needsConfirmation: phone.needsConfirmation,
       });
     }
 
-    const customerEmail = this.extractCustomerEmail(text, captureTarget);
-    if (customerEmail) {
+    const email = this.extractCustomerEmail(text, promptContext.slotKey === 'customerEmail');
+    if (email) {
       updates.push({
         slotKey: 'customerEmail',
-        value: customerEmail.value,
-        canonicalValue: customerEmail.value,
-        confidence: customerEmail.confidence,
-        needsConfirmation: customerEmail.needsConfirmation,
+        value: email.value,
+        canonicalValue: email.value,
+        confidence: email.confidence,
+        needsConfirmation: email.needsConfirmation,
       });
     }
 
@@ -519,7 +427,7 @@ export class SemanticPatchService {
         slotKey: 'preferredDate',
         value: preferredDate,
         canonicalValue: preferredDate,
-        confidence: 0.76,
+        confidence: 0.9,
       });
     }
 
@@ -529,17 +437,7 @@ export class SemanticPatchService {
         slotKey: 'preferredTime',
         value: preferredTime,
         canonicalValue: preferredTime,
-        confidence: 0.74,
-      });
-    }
-
-    const issueDescription = this.extractIssueDescription(text);
-    if (issueDescription) {
-      updates.push({
-        slotKey: 'issueDescription',
-        value: issueDescription,
-        canonicalValue: issueDescription,
-        confidence: 0.66,
+        confidence: 0.88,
       });
     }
 
@@ -550,1075 +448,470 @@ export class SemanticPatchService {
     text: string,
   ): { key: string; label: string } | null {
     const lower = text.toLowerCase();
+
     for (const [key, keywords] of Object.entries(serviceTypeKeywords)) {
       if (keywords.some((keyword) => lower.includes(keyword))) {
         return {
           key,
-          label: key.replaceAll('_', ' '),
+          label: key.replace(/_/g, ' '),
         };
       }
     }
 
-    if (/\bservice\b/.test(lower)) {
-      return {
-        key: 'service',
-        label: 'service',
-      };
-    }
-
     return null;
-  }
-
-  private extractCustomerName(
-    text: string,
-    captureTarget: CaptureSlotKey,
-  ): {
-    value: string;
-    confidence: number;
-    needsConfirmation: boolean;
-  } | null {
-    const match = text.match(
-      /\b(?:my name is|this is|i am|i'm)\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\b/i,
-    );
-    const explicitName = match?.[1]
-      ?.trim()
-      .split(/\s+/)
-      .map((part) =>
-        part
-          ? `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`
-          : '',
-      )
-      .join(' ')
-      .trim();
-
-    if (explicitName) {
-      return {
-        value: explicitName,
-        confidence: 0.97,
-        needsConfirmation: false,
-      };
-    }
-
-    if (captureTarget !== 'customerName') {
-      return null;
-    }
-
-    const stripped = this.stripSlotLeadIn(text, [
-      /\b(?:my name is|this is|i am|i'm|name is|customer name is)\b/gi,
-      /\b(?:it'?s|that is|thats)\b/gi,
-      /\b(?:spelled|spell that|spell it)\b/gi,
-    ]);
-    const spelled = this.extractSpelledNameCapture(stripped);
-    if (spelled.value.length >= 2) {
-      return spelled;
-    }
-
-    if (this.looksLikePlainName(stripped)) {
-      return {
-        value: this.toTitleCase(stripped),
-        confidence: 0.84,
-        needsConfirmation: false,
-      };
-    }
-
-    return null;
-  }
-
-  private extractPhoneNumber(
-    session: SessionState,
-    text: string,
-    captureTarget: CaptureSlotKey,
-  ): {
-    canonical: string;
-    display: string;
-    confidence: number;
-    needsConfirmation: boolean;
-  } | null {
-    const lower = text.toLowerCase();
-    const explicit =
-      /\b(phone|mobile|number|call me on|reach me on|best number)\b/.test(
-        lower,
-      );
-    if (!explicit && captureTarget !== 'phoneNumber') {
-      return null;
-    }
-
-    const digits = this.extractDigitString(
-      this.stripSlotLeadIn(text, [
-        /\b(?:my|the)?\s*(?:phone|mobile|number)\s+(?:is|number is)\b/gi,
-        /\b(?:call me on|reach me on|best number is)\b/gi,
-      ]).toLowerCase(),
-      true,
-    );
-    const existing = this.getExistingSlotValue(session, 'phoneNumber');
-    const mergedDigits =
-      captureTarget === 'phoneNumber'
-        ? this.mergeCaptureSequence(existing, digits)
-        : digits;
-
-    if (mergedDigits.length < 1) {
-      return null;
-    }
-
-    if (mergedDigits.length < 8) {
-      return {
-        canonical: mergedDigits,
-        display: mergedDigits,
-        confidence: 0.45,
-        needsConfirmation: true,
-      };
-    }
-
-    const canonical = mergedDigits.slice(0, 12);
-    return {
-      canonical,
-      display: canonical.replace(/(\d{4})(?=\d)/g, '$1 ').trim(),
-      confidence:
-        canonical.length >= 10
-          ? captureTarget === 'phoneNumber'
-            ? 0.97
-            : 0.94
-          : 0.68,
-      needsConfirmation: canonical.length < 10,
-    };
   }
 
   private extractRegistration(
-    session: SessionState,
     text: string,
-    captureTarget: CaptureSlotKey,
-  ): {
-    value: string;
-    confidence: number;
-    needsConfirmation: boolean;
-  } | null {
-    const explicit = /\b(rego|registration|plate)\b/i.test(text);
-    const cleaned = text
-      .toUpperCase()
-      .replace(/[^A-Z0-9\s]/g, ' ')
-      .replace(/\s+/g, ' ');
-    const matches = cleaned.match(/\b[A-Z0-9]{5,8}\b/g) ?? [];
-
-    for (const candidate of matches) {
-      if (/^\d+$/.test(candidate)) {
-        continue;
-      }
-      if (!/[A-Z]/.test(candidate) || !/\d/.test(candidate)) {
-        continue;
-      }
-      return {
-        value: candidate,
-        confidence: 0.98,
-        needsConfirmation: false,
-      };
-    }
-
-    if (!explicit && captureTarget !== 'vehicleRegistration') {
+    captureTarget: boolean,
+  ): { value: string; confidence: number; needsConfirmation: boolean } | null {
+    const explicit =
+      /\b(rego|registration|plate)\b/i.test(text) || captureTarget;
+    if (!explicit) {
       return null;
     }
 
-    const capture = this.extractSpokenRegistrationCapture(text);
-    const existing = this.getExistingSlotValue(session, 'vehicleRegistration');
-    const mergedCandidate =
-      captureTarget === 'vehicleRegistration'
-        ? this.mergeCaptureSequence(existing, capture.candidate)
-        : capture.candidate;
-    const hasMergedTokens =
-      capture.hasMergedTokens ||
-      (Boolean(existing) &&
-        Boolean(capture.candidate) &&
-        mergedCandidate !== capture.candidate);
-    const confidence = existing
-      ? Math.min(capture.confidence, 0.82)
-      : capture.confidence;
-
-    if (
-      mergedCandidate.length >= 4 &&
-      mergedCandidate.length <= 8 &&
-      /[A-Z]/.test(mergedCandidate) &&
-      /\d/.test(mergedCandidate)
-    ) {
+    const direct = this.extractPlateToken(text);
+    if (direct) {
       return {
-        value: mergedCandidate,
-        confidence,
-        needsConfirmation: hasMergedTokens || confidence < 0.9,
+        value: direct,
+        confidence: captureTarget ? 0.88 : 0.93,
+        needsConfirmation: captureTarget && !/\b(rego|registration|plate)\b/i.test(text),
       };
     }
 
-    if (
-      captureTarget === 'vehicleRegistration' &&
-      mergedCandidate.length > 0 &&
-      mergedCandidate.length <= 8
-    ) {
-      return {
-        value: mergedCandidate,
-        confidence: Math.min(confidence, 0.55),
-        needsConfirmation: true,
-      };
-    }
-
-    return null;
-  }
-
-  private extractPreferredDate(text: string): string | null {
-    const match = text.match(
-      /\b(today|tomorrow|next week|next monday|next tuesday|next wednesday|next thursday|next friday|next saturday|next sunday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+    const spoken = this.extractMappedSequence(
+      text,
+      'vehicleRegistration',
+      captureTarget,
     );
-    return match?.[1]?.trim() ?? null;
-  }
-
-  private extractPreferredTime(text: string): string | null {
-    const match =
-      text.match(/\b(\d{1,2}(?::\d{2})?\s?(?:am|pm))\b/i) ??
-      text.match(/\b(morning|afternoon|evening)\b/i);
-    return match?.[1]?.trim() ?? null;
-  }
-
-  private extractIssueDescription(text: string): string | null {
-    const lower = text.toLowerCase();
-    if (
-      /\b(problem|issue|noise|warning light|check engine|not working|rattle|vibration|leak)\b/.test(
-        lower,
-      )
-    ) {
-      return text.replace(/\s+/g, ' ').trim();
+    if (spoken.length < 3) {
+      return null;
     }
 
-    return null;
+    return {
+      value: spoken,
+      confidence: 0.76,
+      needsConfirmation: true,
+    };
+  }
+
+  private extractPhoneNumber(
+    text: string,
+    captureTarget: boolean,
+  ):
+    | {
+        display: string;
+        canonical: string;
+        confidence: number;
+        needsConfirmation: boolean;
+      }
+    | null {
+    const explicit =
+      /\b(phone|mobile|number)\b/i.test(text) || captureTarget;
+    if (!explicit) {
+      return null;
+    }
+
+    const scopedText = captureTarget
+      ? text
+      : this.extractAnswerTail(text, /\b(?:phone|mobile|number)\b/i);
+    const candidate = this.extractDigitSequence(scopedText, captureTarget);
+    if (candidate.length < 8 || candidate.length > 11) {
+      return null;
+    }
+
+    return {
+      display: this.formatPhoneNumber(candidate),
+      canonical: candidate,
+      confidence: /\d/.test(text) ? 0.94 : 0.8,
+      needsConfirmation: !/\d/.test(text),
+    };
   }
 
   private extractCustomerEmail(
     text: string,
-    captureTarget: CaptureSlotKey,
-  ): {
-    value: string;
-    confidence: number;
-    needsConfirmation: boolean;
-  } | null {
-    const lower = text.toLowerCase();
-    const explicit = /\b(email|e-mail|email address)\b/.test(lower);
-    if (!explicit && captureTarget !== 'customerEmail') {
+    captureTarget: boolean,
+  ): { value: string; confidence: number; needsConfirmation: boolean } | null {
+    const explicit =
+      /\b(email|e-mail)\b/i.test(text) || captureTarget;
+    if (!explicit) {
       return null;
     }
 
-    const stripped = this.stripSlotLeadIn(text, [
-      /\b(?:my|the)?\s*(?:email|e-mail|email address)\s+(?:is|address is)\b/gi,
-      /\b(?:contact email is|send it to)\b/gi,
-    ]);
-    const candidate = this.extractSpokenEmailCandidate(stripped);
-    if (!this.isEmailAddress(candidate)) {
-      return null;
-    }
+    const scopedText = captureTarget
+      ? text
+      : this.extractAnswerTail(text, /\b(?:email|e-mail)\b/i);
 
-    return {
-      value: candidate,
-      confidence: explicit ? 0.92 : 0.88,
-      needsConfirmation: !explicit,
-    };
-  }
-
-  private extractDigitString(text: string, _aggressive = false): string {
-    const normalizedWords = text
-      .replace(/\bdouble\s+([a-z]+)\b/g, (_match, value: string) => {
-        const digit = numberWords.get(value) ?? '';
-        return digit ? `${digit}${digit}` : value;
-      })
-      .replace(/\btriple\s+([a-z]+)\b/g, (_match, value: string) => {
-        const digit = numberWords.get(value) ?? '';
-        return digit ? `${digit}${digit}${digit}` : value;
-      })
-      .split(/\s+/)
-      .map((word) => numberWords.get(word) ?? word)
-      .join(' ');
-
-    return normalizedWords.replace(/\D/g, '');
-  }
-
-  private resolveCaptureTarget(
-    session: SessionState,
-    profile: ConversationProfile,
-    text: string,
-    promptContext: {
-      slotKey: CaptureSlotKey;
-      action: 'ask' | 'confirm' | null;
-    },
-  ): CaptureSlotKey {
-    const lower = text.toLowerCase();
-    if (/\b(email|e-mail|email address)\b/.test(lower)) {
-      return 'customerEmail';
-    }
-    if (/\b(phone|mobile|number|call me on|reach me on)\b/.test(lower)) {
-      return 'phoneNumber';
-    }
-    if (/\b(rego|registration|plate)\b/.test(lower)) {
-      return 'vehicleRegistration';
-    }
-    if (/\b(my name is|this is|i am|i'm|name is)\b/.test(lower)) {
-      return 'customerName';
-    }
-
-    const promptedSlot = promptContext.slotKey;
-    if (
-      promptedSlot === 'vehicleRegistration' ||
-      promptedSlot === 'phoneNumber' ||
-      promptedSlot === 'customerEmail' ||
-      promptedSlot === 'customerName'
-    ) {
-      return promptedSlot;
-    }
-
-    const nextMissingActionSlot = profile.actionReadySlotKeys.find(
-      (slotKey) => {
-        const slot = session.conversation?.liveIntent.slots[slotKey];
-        return (
-          !slot?.value || slot.needsConfirmation || slot.status !== 'confirmed'
-        );
-      },
+    const typedMatch = scopedText.match(
+      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
     );
-
-    if (
-      nextMissingActionSlot === 'vehicleRegistration' ||
-      nextMissingActionSlot === 'phoneNumber' ||
-      nextMissingActionSlot === 'customerName'
-    ) {
-      return nextMissingActionSlot;
-    }
-
-    return null;
-  }
-
-  private extractControlPatches(
-    session: SessionState,
-    profile: ConversationProfile,
-    text: string,
-    fragment: TranscriptFragment,
-    promptContext: {
-      slotKey: CaptureSlotKey;
-      action: 'ask' | 'confirm' | null;
-    },
-  ): SemanticPatch[] {
-    if (profile.key !== 'car_booking_receptionist') {
-      return [];
-    }
-
-    const patches: SemanticPatch[] = [];
-    const lower = text.trim().toLowerCase();
-    const normalized = this.normalizeControlUtterance(text);
-
-    if (promptContext.action === 'confirm' && promptContext.slotKey) {
-      if (this.isAffirmative(normalized)) {
-        patches.push({
-          type: 'confirm_slot',
-          slotKey: promptContext.slotKey,
-          at: fragment.receivedAt,
-        });
-      } else if (this.isNegative(normalized)) {
-        patches.push({
-          type: 'clear_slot',
-          slotKey: promptContext.slotKey,
-          at: fragment.receivedAt,
-        });
-      }
-    }
-
-    const correctedSlot = this.detectCorrectedSlot(session, text);
-    if (correctedSlot) {
-      patches.push({
-        type: 'clear_slot',
-        slotKey: correctedSlot,
-        at: fragment.receivedAt,
-      });
-    }
-
-    return patches;
-  }
-
-  private detectCorrectedSlot(
-    session: SessionState,
-    text: string,
-  ): CaptureSlotKey {
-    const lower = text.toLowerCase();
-    const normalized = this.normalizeControlUtterance(text);
-
-    if (
-      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(rego|registration|plate)\b/.test(
-        lower,
-      )
-    ) {
-      return 'vehicleRegistration';
-    }
-    if (
-      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(phone|mobile|number)\b/.test(
-        lower,
-      )
-    ) {
-      return 'phoneNumber';
-    }
-    if (
-      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(email|e-mail)\b/.test(
-        lower,
-      )
-    ) {
-      return 'customerEmail';
-    }
-    if (
-      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(name)\b/.test(
-        lower,
-      )
-    ) {
-      return 'customerName';
-    }
-
-    if (this.isNegative(normalized)) {
-      const promptSlot = this.resolvePromptContext(session).slotKey;
-      if (
-        promptSlot === 'vehicleRegistration' ||
-        promptSlot === 'phoneNumber' ||
-        promptSlot === 'customerEmail' ||
-        promptSlot === 'customerName'
-      ) {
-        return promptSlot;
-      }
-    }
-
-    const promptSlot = this.resolvePromptContext(session).slotKey;
-    if (
-      (promptSlot === 'vehicleRegistration' ||
-        promptSlot === 'phoneNumber' ||
-        promptSlot === 'customerEmail' ||
-        promptSlot === 'customerName') &&
-      /\b(no|wrong|incorrect|not right|not entirely|not exactly|at the end|after the)\b/.test(
-        lower,
-      )
-    ) {
-      return promptSlot;
-    }
-
-    return null;
-  }
-
-  private resolvePromptContext(session: SessionState): {
-    slotKey: CaptureSlotKey;
-    action: 'ask' | 'confirm' | null;
-  } {
-    const prompt = session.conversation?.liveIntent.prompt;
-    if (
-      (prompt?.slotKey === 'vehicleRegistration' ||
-        prompt?.slotKey === 'phoneNumber' ||
-        prompt?.slotKey === 'customerEmail' ||
-        prompt?.slotKey === 'customerName') &&
-      (prompt.action === 'ask' || prompt.action === 'confirm')
-    ) {
+    if (typedMatch) {
       return {
-        slotKey: prompt.slotKey,
-        action: prompt.action,
-      };
-    }
-
-    const lastAssistantText =
-      session.assistantDraftTurn?.text ||
-      session.recentAssistantResponses.at(-1) ||
-      '';
-    const lower = lastAssistantText.toLowerCase();
-
-    if (
-      /vehicle registration is .*is that correct\?/i.test(lastAssistantText)
-    ) {
-      return { slotKey: 'vehicleRegistration', action: 'confirm' };
-    }
-    if (/phone number is .*is that correct\?/i.test(lastAssistantText)) {
-      return { slotKey: 'phoneNumber', action: 'confirm' };
-    }
-    if (/email .*is that correct\?/i.test(lastAssistantText)) {
-      return { slotKey: 'customerEmail', action: 'confirm' };
-    }
-    if (/name .*is that correct\?/i.test(lastAssistantText)) {
-      return { slotKey: 'customerName', action: 'confirm' };
-    }
-    if (/\bwhat is the vehicle registration\b/.test(lower)) {
-      return { slotKey: 'vehicleRegistration', action: 'ask' };
-    }
-    if (/\bshare your vehicle registration again\b/.test(lower)) {
-      return { slotKey: 'vehicleRegistration', action: 'ask' };
-    }
-    if (
-      /\bphone number\b/.test(lower) &&
-      /\bdigits one at a time\b/.test(lower)
-    ) {
-      return { slotKey: 'phoneNumber', action: 'ask' };
-    }
-    if (/\bemail address\b/.test(lower)) {
-      return { slotKey: 'customerEmail', action: 'ask' };
-    }
-    if (/\bname for the booking\b/.test(lower)) {
-      return { slotKey: 'customerName', action: 'ask' };
-    }
-
-    return { slotKey: null, action: null };
-  }
-
-  private isAffirmative(text: string): boolean {
-    return /^(?:yes|yeah|yep|correct|that'?s right|that is right|right|exactly|affirmative|sure)$/i.test(
-      text.trim(),
-    );
-  }
-
-  private isNegative(text: string): boolean {
-    return /^(?:no|nope|nah|not correct|that'?s not correct|that is not correct|wrong|incorrect|not right|not entirely|not exactly)$/i.test(
-      text.trim(),
-    );
-  }
-
-  private isSlotControlUtterance(text: string): boolean {
-    const lower = text.toLowerCase().trim();
-    const normalized = this.normalizeControlUtterance(text);
-    if (
-      /\b(confirm|check|repeat|read back|readback|say back)\b.*\b(rego|registration|plate|regal|phone|mobile|number|email|e-mail|name)\b/.test(
-        lower,
-      )
-    ) {
-      return true;
-    }
-
-    return (
-      /\b(?:not (?:the )?correct|wrong|incorrect|not right)\b.*\b(rego|registration|plate|phone|mobile|number|email|e-mail|name)\b/.test(
-        lower,
-      ) ||
-      /\bafter the\b|\bat the end\b|\bon the end\b/.test(lower) ||
-      this.isAffirmative(normalized) ||
-      this.isNegative(normalized)
-    );
-  }
-
-  private normalizeControlUtterance(text: string): string {
-    return text
-      .toLowerCase()
-      .replace(/[^a-z0-9'\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  private getExistingSlotValue(
-    session: SessionState,
-    slotKey: 'vehicleRegistration' | 'phoneNumber',
-  ): string {
-    const slot = session.conversation?.liveIntent.slots[slotKey];
-    if (!slot?.value) {
-      return '';
-    }
-
-    if (slot.status === 'confirmed' && !slot.needsConfirmation) {
-      return '';
-    }
-
-    return (slot.canonicalValue ?? slot.value).replace(/[^A-Z0-9]/gi, '');
-  }
-
-  private mergeCaptureSequence(existing: string, next: string): string {
-    if (!existing) {
-      return next;
-    }
-    if (!next) {
-      return existing;
-    }
-
-    const normalizedExisting = existing.replace(/\s+/g, '');
-    const normalizedNext = next.replace(/\s+/g, '');
-
-    if (!normalizedExisting) {
-      return normalizedNext;
-    }
-    if (!normalizedNext) {
-      return normalizedExisting;
-    }
-    if (normalizedNext.startsWith(normalizedExisting)) {
-      return normalizedNext;
-    }
-    if (normalizedExisting.startsWith(normalizedNext)) {
-      return normalizedExisting;
-    }
-    if (normalizedExisting.endsWith(normalizedNext)) {
-      return normalizedExisting;
-    }
-
-    const maxOverlap = Math.min(
-      normalizedExisting.length,
-      normalizedNext.length,
-    );
-    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-      if (
-        normalizedExisting.slice(-overlap) === normalizedNext.slice(0, overlap)
-      ) {
-        return `${normalizedExisting}${normalizedNext.slice(overlap)}`;
-      }
-    }
-
-    return `${normalizedExisting}${normalizedNext}`;
-  }
-
-  private extractSpokenRegistrationCapture(text: string): RegistrationCapture {
-    const stripped = this.stripSlotLeadIn(text, [
-      /\b(?:the\s+)?(?:vehicle\s+)?(?:registration|rego|plate)(?:\s+(?:is|number is))?\b/gi,
-      /\b(?:it'?s|that is|thats)\b/gi,
-    ]);
-    const tokens = this.tokenizeCaptureInput(stripped);
-    const normalized = tokens
-      .map((token) => this.normalizeRegistrationToken(token))
-      .filter((token) => Boolean(token.output));
-    const candidate = normalized
-      .map((token) => token.output)
-      .join('')
-      .replace(/[^A-Z0-9]/g, '')
-      .slice(0, 8);
-    const confidence = normalized.length
-      ? normalized.reduce((sum, token) => sum + token.confidence, 0) /
-        normalized.length
-      : 0;
-
-    return {
-      candidate,
-      confidence,
-      hasMergedTokens: normalized.some((token) => token.merged),
-    };
-  }
-
-  private looksLikeSpelledRegistration(text: string): boolean {
-    const stripped = this.stripSlotLeadIn(text, [
-      /\b(?:the\s+)?(?:vehicle\s+)?(?:registration|rego|plate)(?:\s+(?:is|number is))?\b/gi,
-    ]);
-    const tokens = this.tokenizeCaptureInput(stripped);
-    return tokens.some(
-      (token) =>
-        Boolean(this.normalizeRegistrationToken(token).output) ||
-        /^[A-Za-z0-9-]+$/.test(token),
-    );
-  }
-
-  private extractSpokenEmailCandidate(text: string): string {
-    const tokens = this.tokenizeCaptureInput(text);
-    const normalized = tokens
-      .map((token) => this.normalizeCaptureToken(token, 'customerEmail'))
-      .filter(Boolean)
-      .join('')
-      .replace(/\s+/g, '')
-      .toLowerCase();
-
-    return normalized;
-  }
-
-  private extractSpelledNameCapture(text: string): {
-    value: string;
-    confidence: number;
-    needsConfirmation: boolean;
-  } {
-    const tokens = this.tokenizeCaptureInput(text);
-    const normalized = tokens
-      .map((token) => this.normalizeNameToken(token))
-      .filter((token) => Boolean(token.output));
-    const characters = normalized.map((token) => token.output).join('');
-
-    if (!characters) {
-      return {
-        value: '',
-        confidence: 0,
+        value: typedMatch[0].toLowerCase(),
+        confidence: 0.96,
         needsConfirmation: false,
       };
     }
 
-    const confidence = normalized.length
-      ? normalized.reduce((sum, token) => sum + token.confidence, 0) /
-        normalized.length
-      : 0;
+    const spoken = this.extractSpokenEmail(scopedText);
+    if (!spoken) {
+      return null;
+    }
 
     return {
-      value: this.toTitleCase(characters),
-      confidence,
-      needsConfirmation: normalized.some((token) => token.merged),
+      value: spoken,
+      confidence: 0.82,
+      needsConfirmation: true,
     };
   }
 
-  private looksLikeSpelledName(text: string): boolean {
-    const stripped = this.stripSlotLeadIn(text, [
-      /\b(?:my name is|this is|i am|i'm|name is)\b/gi,
-      /\b(?:spelled|spell that|spell it)\b/gi,
-    ]);
-    const tokens = this.tokenizeCaptureInput(stripped);
-    return (
-      tokens.length > 0 &&
-      tokens.every((token) => Boolean(this.normalizeNameToken(token).output))
+  private extractCustomerName(
+    text: string,
+    captureTarget: boolean,
+  ): { value: string; confidence: number } | null {
+    const explicitMatch = text.match(
+      /\b(?:my name is|this is|i am|i'm)\s+([A-Za-z][A-Za-z' -]{0,48})/i,
     );
-  }
+    if (explicitMatch) {
+      return {
+        value: this.toNameCase(explicitMatch[1]),
+        confidence: 0.94,
+      };
+    }
 
-  private looksLikePlainName(text: string): boolean {
+    if (!captureTarget) {
+      return null;
+    }
+
+    const spokenLetters = this.extractMappedSequence(text, 'customerName');
+    if (spokenLetters.length >= 2 && /^[A-Z]+$/.test(spokenLetters)) {
+      return {
+        value: this.toNameCase(spokenLetters),
+        confidence: 0.8,
+      };
+    }
+
     const cleaned = text
-      .replace(/[^A-Za-z\s'-]/g, ' ')
+      .replace(/[^A-Za-z' -]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
     if (!cleaned) {
-      return false;
+      return null;
     }
 
     if (
-      /\b(oil|service|booking|rego|registration|phone|number|email|tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(
-        cleaned,
+      ['yes', 'no', 'nope', 'correct', 'wrong', 'sorry'].includes(
+        cleaned.toLowerCase(),
       )
     ) {
-      return false;
+      return null;
     }
 
-    return /^[A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2}$/.test(cleaned);
+    const words = cleaned.split(' ').filter(Boolean);
+    if (!words.length || words.length > 3) {
+      return null;
+    }
+
+    return {
+      value: this.toNameCase(cleaned),
+      confidence: 0.86,
+    };
   }
 
-  private tokenizeCaptureInput(text: string): string[] {
-    return text
-      .toLowerCase()
-      .replace(/['’]/g, '')
-      .replace(/[@]/g, ' @ ')
-      .replace(/[.,!?/\\]/g, ' ')
-      .replace(/-/g, ' ')
-      .replace(/_/g, ' _ ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .split(' ')
-      .filter(Boolean);
-  }
+  private extractPreferredDate(text: string): string | null {
+    const lower = text.toLowerCase();
 
-  private normalizeRegistrationToken(token: string): NormalizedCaptureToken {
-    if (!token) {
-      return { output: '', confidence: 0, merged: false };
+    if (/\btomorrow\b/.test(lower)) {
+      return 'tomorrow';
+    }
+    if (/\btoday\b/.test(lower)) {
+      return 'today';
     }
 
-    if (spokenLetterWords.has(token)) {
-      return {
-        output: spokenLetterWords.get(token) ?? '',
-        confidence: 0.98,
-        merged: false,
-      };
-    }
-
-    if (numberWords.has(token)) {
-      return {
-        output: numberWords.get(token) ?? '',
-        confidence: 0.96,
-        merged: false,
-      };
-    }
-
-    if (/^[a-z0-9]$/i.test(token)) {
-      return {
-        output: token.toUpperCase(),
-        confidence: 0.96,
-        merged: false,
-      };
-    }
-
-    const fuzzyRegistration = this.fuzzyNormalizeToken(
-      token,
-      'vehicleRegistration',
+    const nextWeekday = lower.match(
+      /\bnext\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
     );
-    if (fuzzyRegistration) {
-      return {
-        output: fuzzyRegistration.toUpperCase(),
-        confidence: fuzzyRegistration.length > 1 ? 0.78 : 0.84,
-        merged: fuzzyRegistration.length > 1,
-      };
+    if (nextWeekday) {
+      return `next ${nextWeekday[1]}`;
     }
 
-    if (/^[a-z0-9]{2,3}$/i.test(token)) {
-      return {
-        output: token.toUpperCase(),
-        confidence: token.length === 3 ? 0.82 : 0.76,
-        merged: true,
-      };
+    const weekday = lower.match(
+      /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
+    );
+    if (weekday) {
+      return weekday[1];
     }
 
-    return { output: '', confidence: 0, merged: false };
+    return null;
   }
 
-  private normalizeNameToken(token: string): NormalizedCaptureToken {
-    if (!token) {
-      return { output: '', confidence: 0, merged: false };
+  private extractPreferredTime(text: string): string | null {
+    const match = text.match(
+      /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)\b/i,
+    );
+    if (!match) {
+      return null;
     }
 
-    if (spokenLetterWords.has(token)) {
-      return {
-        output: (spokenLetterWords.get(token) ?? '').toLowerCase(),
-        confidence: 0.97,
-        merged: false,
-      };
-    }
-
-    if (/^[a-z]$/i.test(token)) {
-      return {
-        output: token.toLowerCase(),
-        confidence: 0.96,
-        merged: false,
-      };
-    }
-
-    const fuzzyName = this.fuzzyNormalizeToken(token, 'customerName');
-    if (fuzzyName) {
-      return {
-        output: fuzzyName.toLowerCase(),
-        confidence: fuzzyName.length > 1 ? 0.76 : 0.84,
-        merged: fuzzyName.length > 1,
-      };
-    }
-
-    return { output: '', confidence: 0, merged: false };
+    const hours = match[1];
+    const minutes = match[2];
+    const suffix = match[3].replace(/\./g, '').toLowerCase();
+    return minutes ? `${hours}:${minutes} ${suffix}` : `${hours} ${suffix}`;
   }
 
-  private normalizeCaptureToken(
-    token: string,
-    captureTarget: Exclude<CaptureSlotKey, null>,
-  ): string {
-    if (!token) {
-      return '';
+  private extractAnswerTail(text: string, marker: RegExp): string {
+    const match = marker.exec(text);
+    if (match?.index === undefined) {
+      return text;
     }
 
-    if (captureTarget === 'customerEmail') {
-      if (emailSymbolWords.has(token)) {
-        return emailSymbolWords.get(token) ?? '';
-      }
-      if (spokenLetterWords.has(token)) {
-        return (spokenLetterWords.get(token) ?? '').toLowerCase();
-      }
-      if (numberWords.has(token)) {
-        return numberWords.get(token) ?? '';
-      }
-      if (token === '@' || token === '_' || token === '.' || token === '-') {
-        return token;
-      }
-      if (/^[a-z0-9]+$/.test(token)) {
-        return token.toLowerCase();
-      }
-      return '';
+    const tail = text.slice(match.index + match[0].length);
+    return tail.replace(/^\s*(?:is|for|to|at|:|-)\s*/i, '').trim();
+  }
+
+  private extractPlateToken(text: string): string | null {
+    const matches = text.toUpperCase().match(/\b[A-Z0-9]{3,8}\b/g) ?? [];
+    const banned = new Set([
+      'EMAIL',
+      'PHONE',
+      'NUMBER',
+      'SERVICE',
+      'REGO',
+      'PLATE',
+      'CAR',
+      'BOOKING',
+      'REGISTRATION',
+    ]);
+
+    return (
+      matches.find((candidate) => {
+        const normalized = candidate.toLowerCase();
+        if (banned.has(candidate)) {
+          return false;
+        }
+        if (this.isCommonWord(normalized)) {
+          return false;
+        }
+        if (numberWords.has(normalized) || spokenLetterWords.has(normalized)) {
+          return false;
+        }
+        return true;
+      }) ?? null
+    );
+  }
+
+  private extractDigitSequence(text: string, allowLooseAliases = false): string {
+    const numericGroups = text.match(/\d+/g) ?? [];
+    const directDigits = numericGroups.join('');
+    if (directDigits) {
+      return directDigits;
     }
 
-    if (captureTarget === 'phoneNumber') {
-      if (numberWords.has(token)) {
-        return numberWords.get(token) ?? '';
+    const digits: string[] = [];
+
+    for (const rawToken of text.split(/\s+/)) {
+      const token = rawToken.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!token) {
+        continue;
       }
+
       if (/^\d+$/.test(token)) {
-        return token;
+        digits.push(token);
+        continue;
       }
-      return '';
+
+      const mapped = this.mapNumberToken(token, allowLooseAliases);
+      if (mapped) {
+        digits.push(mapped);
+      }
     }
 
-    if (captureTarget === 'customerName') {
-      if (spokenLetterWords.has(token)) {
-        return (spokenLetterWords.get(token) ?? '').toLowerCase();
-      }
-      if (/^[a-z]+$/.test(token) && token.length === 1) {
-        return token.toLowerCase();
-      }
-      const fuzzyName = this.fuzzyNormalizeToken(token, captureTarget);
-      if (fuzzyName) {
-        return fuzzyName.toLowerCase();
-      }
-      return '';
-    }
-
-    if (captureTarget === 'vehicleRegistration') {
-      if (spokenLetterWords.has(token)) {
-        return spokenLetterWords.get(token) ?? '';
-      }
-      if (numberWords.has(token)) {
-        return numberWords.get(token) ?? '';
-      }
-      if (/^[a-z0-9]{1,3}$/i.test(token)) {
-        return token.toUpperCase();
-      }
-      const fuzzyRegistration = this.fuzzyNormalizeToken(token, captureTarget);
-      if (fuzzyRegistration) {
-        return fuzzyRegistration.toUpperCase();
-      }
-      return '';
-    }
-
-    if (spokenLetterWords.has(token)) {
-      return spokenLetterWords.get(token) ?? '';
-    }
-    if (numberWords.has(token)) {
-      return numberWords.get(token) ?? '';
-    }
-    const fuzzyFallback = this.fuzzyNormalizeToken(token, captureTarget);
-    if (fuzzyFallback) {
-      return fuzzyFallback;
-    }
-    if (/^[a-z0-9]+$/i.test(token)) {
-      return token.toUpperCase();
-    }
-
-    return '';
+    return digits.join('');
   }
 
-  private fuzzyNormalizeToken(
-    token: string,
-    captureTarget: Exclude<CaptureSlotKey, null>,
+  private extractMappedSequence(
+    text: string,
+    slotKey: CaptureSlotKey,
+    allowLooseNumberAliases = false,
   ): string {
-    const units = this.getFuzzyUnits(captureTarget);
-    if (!units.length) {
-      return '';
-    }
+    const outputs: string[] = [];
 
-    const normalizedToken = this.normalizeForFuzzy(token);
-    if (!normalizedToken || normalizedToken.length < 2) {
-      return '';
-    }
-
-    const tokenSkeleton = this.getPhoneticSkeleton(normalizedToken);
-    let bestMatch = '';
-    let bestScore = 0;
-
-    for (const unit of units) {
-      const normalizedCandidate = this.normalizeForFuzzy(unit.spoken);
-      if (!normalizedCandidate) {
+    for (const rawToken of text.split(/\s+/)) {
+      const token = rawToken.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!token) {
         continue;
       }
 
-      const candidateSkeleton = this.getPhoneticSkeleton(normalizedCandidate);
-      if (
-        tokenSkeleton &&
-        candidateSkeleton &&
-        tokenSkeleton[0] !== candidateSkeleton[0]
-      ) {
+      if (slotKey !== 'phoneNumber') {
+        const letter = spokenLetterWords.get(token);
+        if (letter) {
+          outputs.push(letter);
+          continue;
+        }
+      }
+
+      if (slotKey !== 'customerName') {
+        if (/^\d+$/.test(token)) {
+          outputs.push(token);
+          continue;
+        }
+
+        const digit = this.mapNumberToken(token, allowLooseNumberAliases);
+        if (digit) {
+          outputs.push(digit);
+          continue;
+        }
+      }
+
+      if (/^[a-z0-9]{2,8}$/i.test(token) && !this.isCommonWord(token)) {
+        outputs.push(token.toUpperCase());
+      }
+    }
+
+    return outputs.join('');
+  }
+
+  private mapNumberToken(
+    token: string,
+    allowLooseAliases: boolean,
+  ): string | null {
+    const mapped = numberWords.get(token);
+    if (!mapped) {
+      return null;
+    }
+
+    if (!allowLooseAliases && looseNumberAliases.has(token)) {
+      return null;
+    }
+
+    return mapped;
+  }
+
+  private extractSpokenEmail(text: string): string | null {
+    const parts: string[] = [];
+    for (const rawToken of text.split(/\s+/)) {
+      const token = rawToken.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!token) {
         continue;
       }
 
-      const exactScore = this.stringSimilarity(
-        normalizedToken,
-        normalizedCandidate,
-      );
-      const skeletonScore = this.stringSimilarity(
-        tokenSkeleton,
-        candidateSkeleton,
-      );
-      const score = exactScore * 0.28 + skeletonScore * 0.72;
+      const symbol = emailSymbolWords.get(token);
+      if (symbol) {
+        parts.push(symbol);
+        continue;
+      }
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = unit.output;
+      const letter = spokenLetterWords.get(token);
+      if (letter) {
+        parts.push(letter.toLowerCase());
+        continue;
+      }
+
+      const digit = numberWords.get(token);
+      if (digit) {
+        parts.push(digit);
+        continue;
+      }
+
+      if (/^[a-z0-9]+$/.test(token) && !this.isCommonWord(token)) {
+        parts.push(token);
       }
     }
 
-    return bestScore >= this.getFuzzyThreshold(captureTarget) ? bestMatch : '';
-  }
-
-  private getFuzzyUnits(
-    captureTarget: Exclude<CaptureSlotKey, null>,
-  ): CaptureUnit[] {
-    switch (captureTarget) {
-      case 'vehicleRegistration':
-        return [
-          ...letterCaptureUnits,
-          ...digitCaptureUnits,
-          ...registrationMergedUnits,
-        ];
-      case 'customerName':
-        return [...letterCaptureUnits, ...nameMergedUnits];
-      case 'phoneNumber':
-        return digitCaptureUnits;
-      case 'customerEmail':
-        return emailCaptureUnits;
-      default:
-        return [];
-    }
-  }
-
-  private getFuzzyThreshold(
-    captureTarget: Exclude<CaptureSlotKey, null>,
-  ): number {
-    switch (captureTarget) {
-      case 'vehicleRegistration':
-        return 0.8;
-      case 'customerName':
-        return 0.88;
-      case 'customerEmail':
-        return 0.9;
-      case 'phoneNumber':
-        return 0.94;
-      default:
-        return 1;
-    }
-  }
-
-  private normalizeForFuzzy(text: string): string {
-    return text.toLowerCase().replace(/[^a-z0-9]/g, '');
-  }
-
-  private getPhoneticSkeleton(text: string): string {
-    return text
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '')
-      .replace(/[aeiouwhy]/g, '')
-      .replace(/(.)\1+/g, '$1');
-  }
-
-  private stringSimilarity(left: string, right: string): number {
-    if (!left && !right) {
-      return 1;
-    }
-    if (!left || !right) {
-      return 0;
-    }
-    if (left === right) {
-      return 1;
+    const candidate = parts.join('');
+    if (!/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(candidate)) {
+      return null;
     }
 
-    const distance = this.levenshteinDistance(left, right);
-    return 1 - distance / Math.max(left.length, right.length);
+    return candidate.toLowerCase();
   }
 
-  private levenshteinDistance(left: string, right: string): number {
-    const rows = left.length + 1;
-    const cols = right.length + 1;
-    const matrix = Array.from({ length: rows }, () =>
-      Array.from<number>({ length: cols }).fill(0),
-    );
-
-    for (let row = 0; row < rows; row += 1) {
-      matrix[row][0] = row;
-    }
-    for (let col = 0; col < cols; col += 1) {
-      matrix[0][col] = col;
+  private formatPhoneNumber(canonical: string): string {
+    if (canonical.length === 10 && canonical.startsWith('04')) {
+      return `${canonical.slice(0, 4)} ${canonical.slice(4, 7)} ${canonical.slice(7)}`;
     }
 
-    for (let row = 1; row < rows; row += 1) {
-      for (let col = 1; col < cols; col += 1) {
-        const substitutionCost = left[row - 1] === right[col - 1] ? 0 : 1;
-        matrix[row][col] = Math.min(
-          matrix[row - 1][col] + 1,
-          matrix[row][col - 1] + 1,
-          matrix[row - 1][col - 1] + substitutionCost,
-        );
-      }
+    if (canonical.length === 10) {
+      return `${canonical.slice(0, 2)} ${canonical.slice(2, 6)} ${canonical.slice(6)}`;
     }
 
-    return matrix[rows - 1][cols - 1];
+    return canonical;
   }
 
-  private stripSlotLeadIn(text: string, patterns: RegExp[]): string {
-    return patterns
-      .reduce((value, pattern) => value.replace(pattern, ' '), text)
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  private isEmailAddress(text: string): boolean {
-    return /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(text);
-  }
-
-  private toTitleCase(text: string): string {
-    return text
+  private toNameCase(value: string): string {
+    return value
+      .trim()
       .split(/\s+/)
-      .filter(Boolean)
-      .map((part) =>
-        part
-          ? `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`
-          : '',
+      .map((word) =>
+        word
+          .split(/([-'])/)
+          .map((part) =>
+            /^[-']$/.test(part)
+              ? part
+              : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase(),
+          )
+          .join(''),
       )
-      .join(' ')
-      .trim();
+      .join(' ');
+  }
+
+  private isCommonWord(token: string): boolean {
+    return [
+      'a',
+      'an',
+      'is',
+      'it',
+      'its',
+      'me',
+      'i',
+      'the',
+      'and',
+      'for',
+      'with',
+      'again',
+      'back',
+      'book',
+      'booking',
+      'call',
+      'can',
+      'service',
+      'share',
+      'provide',
+      'change',
+      'my',
+      'name',
+      'best',
+      'full',
+      'spell',
+      'spelling',
+      'vehicle',
+      'phone',
+      'email',
+      'registration',
+      'rego',
+      'plate',
+      'next',
+      'please',
+      'need',
+      'would',
+      'like',
+      'this',
+      'that',
+      'not',
+      'correct',
+      'wrong',
+      'right',
+      'after',
+      'before',
+      'read',
+      'confirm',
+      'text',
+      'entirely',
+      'end',
+      'car',
+      'cars',
+      'oil',
+    ].includes(token);
   }
 }

@@ -4,7 +4,7 @@ Low-latency local voice-agent platform focused on one production transport path:
 
 Browser microphone
 -> WebRTC voice gateway
--> local faster-whisper STT
+-> local Qwen3-ASR STT
 -> NestJS orchestration
 -> Ollama Qwen reasoning
 -> local Qwen3-TTS streaming CustomVoice
@@ -20,10 +20,12 @@ The project intentionally does not include Groq providers, Laravel booking tools
 
 ## Kept Components
 
-- STT: `distil-whisper/distil-large-v3.5-ct2` through `faster-whisper`.
+- STT: `Qwen/Qwen3-ASR-0.6B` through the local `qwen-asr` runtime.
 - Reasoning: Ollama `/api/chat`, defaulting to `qwen3:8b`.
 - TTS: `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` with streaming PCM chunks.
 - Transport: browser WebRTC plus a small Nest websocket used only between the Python gateway and Nest.
+
+`faster-whisper` is still available as an optional fallback backend, but it is no longer the default path.
 
 ## Setup
 
