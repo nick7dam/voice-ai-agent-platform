@@ -179,6 +179,87 @@ const spokenLetterWords = new Map<string, string>([
   ['zee', 'Z'],
 ]);
 
+const weekdayWords = [
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+] as const;
+
+const monthWords = new Map<string, string>([
+  ['january', 'january'],
+  ['jan', 'january'],
+  ['february', 'february'],
+  ['feb', 'february'],
+  ['march', 'march'],
+  ['mar', 'march'],
+  ['april', 'april'],
+  ['apr', 'april'],
+  ['may', 'may'],
+  ['june', 'june'],
+  ['jun', 'june'],
+  ['july', 'july'],
+  ['jul', 'july'],
+  ['august', 'august'],
+  ['aug', 'august'],
+  ['september', 'september'],
+  ['sep', 'september'],
+  ['sept', 'september'],
+  ['october', 'october'],
+  ['oct', 'october'],
+  ['november', 'november'],
+  ['nov', 'november'],
+  ['december', 'december'],
+  ['dec', 'december'],
+]);
+
+const ordinalWords = new Map<string, number>([
+  ['first', 1],
+  ['second', 2],
+  ['third', 3],
+  ['fourth', 4],
+  ['fifth', 5],
+  ['sixth', 6],
+  ['seventh', 7],
+  ['eighth', 8],
+  ['ninth', 9],
+  ['tenth', 10],
+  ['eleventh', 11],
+  ['twelfth', 12],
+  ['thirteenth', 13],
+  ['fourteenth', 14],
+  ['fifteenth', 15],
+  ['sixteenth', 16],
+  ['seventeenth', 17],
+  ['eighteenth', 18],
+  ['nineteenth', 19],
+  ['twentieth', 20],
+  ['thirtieth', 30],
+]);
+
+const tensWords = new Map<string, number>([
+  ['twenty', 20],
+  ['thirty', 30],
+]);
+
+const timeHourWords = new Map<string, number>([
+  ['one', 1],
+  ['two', 2],
+  ['three', 3],
+  ['four', 4],
+  ['five', 5],
+  ['six', 6],
+  ['seven', 7],
+  ['eight', 8],
+  ['nine', 9],
+  ['ten', 10],
+  ['eleven', 11],
+  ['twelve', 12],
+]);
+
 const bookingGraphStateSchema = new StateSchema({
   sessionId: z.string().default(''),
   taskKey: z.string().default('car_booking_receptionist'),
@@ -888,6 +969,30 @@ export class BookingGraphService {
       });
     }
 
+    const shouldExtractDateTime = this.shouldExtractDateTime(text, state);
+
+    const preferredDate = shouldExtractDateTime
+      ? this.detectPreferredDate(text)
+      : null;
+    if (preferredDate) {
+      extractedUpdates.push({
+        slotKey: 'preferredDate',
+        value: preferredDate,
+        confidence: 0.9,
+      });
+    }
+
+    const preferredTime = shouldExtractDateTime
+      ? this.detectPreferredTime(text)
+      : null;
+    if (preferredTime) {
+      extractedUpdates.push({
+        slotKey: 'preferredTime',
+        value: preferredTime,
+        confidence: 0.88,
+      });
+    }
+
     return {
       userMove: extractedUpdates.length ? 'provide_info' : 'unknown',
       requestedSlotKey: null,
@@ -948,6 +1053,224 @@ export class BookingGraphService {
       .map((token) => numberWords.get(token) ?? '')
       .join('');
     return spokenDigits.length >= 8 ? spokenDigits : null;
+  }
+
+  private shouldExtractDateTime(
+    text: string,
+    state: BookingGraphStateValue,
+  ): boolean {
+    if (
+      state.focusSlot === 'preferredDate' ||
+      state.focusSlot === 'preferredTime' ||
+      state.requestedSlotKey === 'preferredDate' ||
+      state.requestedSlotKey === 'preferredTime'
+    ) {
+      return true;
+    }
+
+    const lower = this.normalizeDateTimeText(text);
+    const monthPattern = Array.from(monthWords.keys()).join('|');
+    const clockWords = Array.from(timeHourWords.keys()).join('|');
+
+    return (
+      /\b(today|tomorrow|day after tomorrow|next)\b/.test(lower) ||
+      new RegExp(`\\b(${weekdayWords.join('|')}|${monthPattern})\\b`).test(
+        lower,
+      ) ||
+      /\b\d{1,2}[:/\-.]\d{1,2}\b/.test(lower) ||
+      new RegExp(
+        `\\b(?:at|around|about|by|before|after)\\s+(?:\\d{1,2}|${clockWords}|midday|noon)\\b`,
+      ).test(lower) ||
+      new RegExp(
+        `\\b(?:\\d{1,2}|${clockWords})\\s*(?:am|pm|a m|p m|o clock|oclock)\\b`,
+      ).test(lower) ||
+      /\b(?:for|in|during)\s+(?:the\s+)?(?:morning|afternoon|evening)\b/.test(
+        lower,
+      )
+    );
+  }
+
+  private detectPreferredDate(text: string): string | null {
+    const lower = this.normalizeDateTimeText(text);
+
+    if (/\bday after tomorrow\b/.test(lower)) {
+      return 'day after tomorrow';
+    }
+    if (/\btomorrow\b/.test(lower)) {
+      return 'tomorrow';
+    }
+    if (/\btoday\b/.test(lower)) {
+      return 'today';
+    }
+
+    const nextWeekday = lower.match(
+      new RegExp(`\\bnext\\s+(${weekdayWords.join('|')})\\b`),
+    );
+    if (nextWeekday) {
+      return `next ${nextWeekday[1]}`;
+    }
+
+    const numericDate = lower.match(
+      /\b(\d{1,2})(?:st|nd|rd|th)?[\/\-. ](\d{1,2})(?:[\/\-. ](\d{2,4}))?\b/,
+    );
+    if (numericDate) {
+      const day = Number(numericDate[1]);
+      const month = Number(numericDate[2]);
+      const year = this.normalizeYearDigits(numericDate[3]);
+      if (this.isValidDayMonth(day, month)) {
+        return year ? `${day}/${month}/${year}` : `${day}/${month}`;
+      }
+    }
+
+    const monthPattern = Array.from(monthWords.keys()).join('|');
+    const numericDayMonth = lower.match(
+      new RegExp(
+        `\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${monthPattern})(?:\\s+(\\d{2,4}|twenty\\s+twenty\\s+\\w+))?\\b`,
+      ),
+    );
+    if (numericDayMonth) {
+      return this.formatSpokenDate(
+        Number(numericDayMonth[1]),
+        numericDayMonth[2],
+        numericDayMonth[3],
+      );
+    }
+
+    const spokenDayMonth = lower.match(
+      new RegExp(
+        `\\b((?:twenty|thirty)\\s+\\w+|\\w+)\\s+(?:of\\s+)?(${monthPattern})(?:\\s+(\\d{2,4}|twenty\\s+twenty\\s+\\w+))?\\b`,
+      ),
+    );
+    if (spokenDayMonth) {
+      const day = this.parseOrdinalDay(spokenDayMonth[1]);
+      if (day) {
+        return this.formatSpokenDate(
+          day,
+          spokenDayMonth[2],
+          spokenDayMonth[3],
+        );
+      }
+    }
+
+    const weekday = lower.match(
+      new RegExp(`\\b(${weekdayWords.join('|')})\\b`),
+    );
+    return weekday?.[1] ?? null;
+  }
+
+  private detectPreferredTime(text: string): string | null {
+    const lower = this.normalizeDateTimeText(text);
+
+    const numericTime = lower.match(
+      /\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a m|p m|a\.m\.|p\.m\.)\b/i,
+    );
+    if (numericTime) {
+      const suffix = numericTime[3].replace(/[\s.]/g, '').toLowerCase();
+      return numericTime[2]
+        ? `${numericTime[1]}:${numericTime[2]} ${suffix}`
+        : `${numericTime[1]} ${suffix}`;
+    }
+
+    const spokenTime = lower.match(
+      /\b(?:at\s+)?(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?:\s+(?:o clock|oclock))?(?:\s*(am|pm|a m|p m|a\.m\.|p\.m\.))?\b/i,
+    );
+    if (spokenTime && (spokenTime[2] || /\b(at|o clock|oclock)\b/.test(lower))) {
+      const hour = timeHourWords.get(spokenTime[1]);
+      if (hour) {
+        const suffix = spokenTime[2]?.replace(/[\s.]/g, '').toLowerCase();
+        return suffix ? `${hour} ${suffix}` : `${hour} o'clock`;
+      }
+    }
+
+    const broadTime = lower.match(
+      /\b(morning|afternoon|evening|midday|noon)\b/,
+    );
+    return broadTime?.[1] ?? null;
+  }
+
+  private normalizeDateTimeText(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/\ba\.m\./g, 'am')
+      .replace(/\bp\.m\./g, 'pm')
+      .replace(/['’]/g, '')
+      .replace(/[^a-z0-9:/.\-\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private normalizeYearDigits(rawYear?: string): string | null {
+    if (!rawYear) {
+      return null;
+    }
+
+    if (/^\d{2}$/.test(rawYear)) {
+      return `20${rawYear}`;
+    }
+
+    if (/^\d{4}$/.test(rawYear)) {
+      return rawYear;
+    }
+
+    return this.parseSpokenYear(rawYear)?.toString() ?? null;
+  }
+
+  private parseSpokenYear(rawYear: string): number | null {
+    const tokens = rawYear.trim().toLowerCase().split(/\s+/);
+    if (
+      tokens.length === 3 &&
+      tokens[0] === 'twenty' &&
+      tokens[1] === 'twenty'
+    ) {
+      const lastDigit = numberWords.get(tokens[2]);
+      return lastDigit ? 2020 + Number(lastDigit) : null;
+    }
+
+    return null;
+  }
+
+  private isValidDayMonth(day: number, month: number): boolean {
+    return (
+      Number.isInteger(day) &&
+      Number.isInteger(month) &&
+      day >= 1 &&
+      day <= 31 &&
+      month >= 1 &&
+      month <= 12
+    );
+  }
+
+  private formatSpokenDate(
+    day: number,
+    rawMonth: string,
+    rawYear?: string,
+  ): string | null {
+    const month = monthWords.get(rawMonth.toLowerCase());
+    if (!month || day < 1 || day > 31) {
+      return null;
+    }
+
+    const year = this.normalizeYearDigits(rawYear);
+    return year ? `${day} ${month} ${year}` : `${day} ${month}`;
+  }
+
+  private parseOrdinalDay(rawDay: string): number | null {
+    const normalized = rawDay.trim().toLowerCase().replace(/\s+/g, ' ');
+    const direct = ordinalWords.get(normalized);
+    if (direct) {
+      return direct;
+    }
+
+    const parts = normalized.split(' ');
+    if (parts.length === 2) {
+      const tens = tensWords.get(parts[0]);
+      const ordinal = ordinalWords.get(parts[1]);
+      if (tens && ordinal && ordinal < 10) {
+        return tens + ordinal;
+      }
+    }
+
+    return null;
   }
 
   private detectNamedName(text: string): string | null {

@@ -50,6 +50,38 @@ describe('BookingGraphService', () => {
     };
   }
 
+  async function moveToPreferredDatePrompt() {
+    const { sessions, tasks, reasoning, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+    const task = tasks.get('car_booking_receptionist');
+
+    reasoning.enqueue(
+      'What is the vehicle registration?',
+      'I have the vehicle registration as 4 Z X 2 B X. Is that right?',
+      'Can I get your name for the booking?',
+      'What is the best phone number for the booking?',
+      'The phone number you provided is 0-4-8-2-9-0-6-0-5. Is that correct?',
+      'What day would you like to book it for?',
+    );
+
+    await service.processTurn(session, task, 'turn-1', 'Oil change.');
+    await service.processTurn(session, task, 'turn-2', '4ZX2BX');
+    await service.processTurn(session, task, 'turn-3', "yes, that's correct");
+    await service.processTurn(session, task, 'turn-4', 'Nick');
+    await service.processTurn(session, task, 'turn-5', '048290605');
+    const ready = await service.processTurn(
+      session,
+      task,
+      'turn-6',
+      "yes, that's correct",
+    );
+
+    expect(ready.decision.action).toBe('ask');
+    expect(ready.decision.slotKey).toBe('preferredDate');
+
+    return { session, task, reasoning, service };
+  }
+
   it('moves from rego confirmation to the next missing slot when the caller confirms', async () => {
     const { sessions, tasks, reasoning, service } = createService();
     const session = sessions.create('car_booking_receptionist');
@@ -369,5 +401,74 @@ describe('BookingGraphService', () => {
     expect(third.decision.slotKey).toBe('vehicleRegistration');
     expect(third.state.slots.vehicleRegistration.value).toBeNull();
     expect(third.state.slots.vehicleRegistration.status).toBe('missing');
+  });
+
+  it('captures a relative date and spoken time without asking for the date again', async () => {
+    const { session, task, reasoning, service } =
+      await moveToPreferredDatePrompt();
+
+    reasoning.enqueue('Thanks, I have what I need for the booking.');
+
+    const result = await service.processTurn(
+      session,
+      task,
+      'turn-7',
+      'Tomorrow at two p.m.',
+    );
+
+    expect(result.state.slots.preferredDate.value).toBe('tomorrow');
+    expect(result.state.slots.preferredTime.value).toBe('2 pm');
+    expect(result.decision.action).toBe('act');
+    expect(result.decision.slotKey).toBeUndefined();
+  });
+
+  it('captures a weekday and spoken time in one turn', async () => {
+    const { session, task, reasoning, service } =
+      await moveToPreferredDatePrompt();
+
+    reasoning.enqueue('Thanks, I have what I need for the booking.');
+
+    const result = await service.processTurn(
+      session,
+      task,
+      'turn-7',
+      'Thursday at two p.m.',
+    );
+
+    expect(result.state.slots.preferredDate.value).toBe('thursday');
+    expect(result.state.slots.preferredTime.value).toBe('2 pm');
+    expect(result.decision.action).toBe('act');
+    expect(result.decision.slotKey).toBeUndefined();
+  });
+
+  it('captures a spoken calendar date before a follow-up o clock time', async () => {
+    const { session, task, reasoning, service } =
+      await moveToPreferredDatePrompt();
+
+    reasoning.enqueue(
+      'Is there a preferred time of day?',
+      'Thanks, I have what I need for the booking.',
+    );
+
+    const date = await service.processTurn(
+      session,
+      task,
+      'turn-7',
+      'Twenty fourth of April, twenty twenty six at.',
+    );
+
+    expect(date.state.slots.preferredDate.value).toBe('24 april 2026');
+    expect(date.decision.action).toBe('act');
+
+    const time = await service.processTurn(
+      session,
+      task,
+      'turn-8',
+      "It's at two o'clock.",
+    );
+
+    expect(time.state.slots.preferredDate.value).toBe('24 april 2026');
+    expect(time.state.slots.preferredTime.value).toBe("2 o'clock");
+    expect(time.decision.action).toBe('act');
   });
 });
