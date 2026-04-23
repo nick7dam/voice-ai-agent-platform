@@ -36,6 +36,11 @@ export const defaultTasks: TaskConfig[] = [
     behaviorGuidelines: [
       'Return only user-facing plain text.',
       'Keep spoken replies short, clear, and helpful.',
+      'Transcribe exactly.',
+      'If the speaker is spelling letters or digits, output each character separately.',
+      'Do not autocorrect into normal words.',
+      'Preserve repeated digits exactly.',
+      'Preserve separators like dash, slash, and spaces.',
       'Do not use markdown, JSON, code blocks, tool call syntax, SSML, or stage directions.',
       'Use the live booking details already collected. Do not ask again for details that are already confirmed unless the caller corrects them.',
       'If the caller pauses mid-thought, wait for the rest of the thought instead of jumping in too early.',
