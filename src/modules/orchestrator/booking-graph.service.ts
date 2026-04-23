@@ -723,12 +723,67 @@ export class BookingGraphService {
       return null;
     }
 
-    if (
-      confirmationTarget &&
+    const compact = normalized.replace(/[^a-z0-9]+/g, '');
+    const affirmativeCompacts = new Set([
+      'yes',
+      'yeah',
+      'yep',
+      'correct',
+      'right',
+      'sure',
+      'exactly',
+      'yescorrect',
+      'yesright',
+      'yesthatscorrect',
+      'yesthatiscorrect',
+      'yesthatsright',
+      'yesthatisright',
+      'thatscorrect',
+      'thatiscorrect',
+      'thatsright',
+      'thatisright',
+      'itscorrect',
+      'itiscorrect',
+      'itsright',
+      'itisright',
+    ]);
+    const negativeCompacts = new Set([
+      'no',
+      'nope',
+      'incorrect',
+      'wrong',
+      'notcorrect',
+      'notright',
+      'notentirely',
+      'noitsnot',
+      'noitisnot',
+      'noitsnotcorrect',
+      'noitisnotcorrect',
+      'thatswrong',
+      'thatiswrong',
+      'thatsnotcorrect',
+      'thatisnotcorrect',
+      'thatsnotright',
+      'thatisnotright',
+      'thatsnotit',
+      'thatisnotit',
+      'itswrong',
+      'itiswrong',
+      'itsnotcorrect',
+      'itisnotcorrect',
+      'itsnotright',
+      'itisnotright',
+    ]);
+    const isAffirmative =
       /^(yes|yes that'?s correct|yes that is right|that is correct|that'?s right|it'?s right|correct)$/i.test(
         normalized,
-      )
-    ) {
+      ) || affirmativeCompacts.has(compact);
+    const isNegative =
+      /^(no|nope|no that'?s not right|no it'?s not|not correct|not right|incorrect|wrong|that'?s wrong|that is wrong|not entirely)$/i.test(
+        normalized,
+      ) || negativeCompacts.has(compact);
+
+    if (confirmationTarget && isAffirmative) {
       return {
         userMove: 'confirm',
         requestedSlotKey: null,
@@ -736,14 +791,17 @@ export class BookingGraphService {
       };
     }
 
-    if (
-      confirmationTarget &&
-      /^(no|nope|no that'?s not right|no it'?s not|not correct|not entirely)$/i.test(
-        normalized,
-      )
-    ) {
+    if (confirmationTarget && isNegative) {
       return {
         userMove: 'deny',
+        requestedSlotKey: null,
+        extractedUpdates: [],
+      };
+    }
+
+    if (isAffirmative || isNegative) {
+      return {
+        userMove: 'unknown',
         requestedSlotKey: null,
         extractedUpdates: [],
       };
@@ -1190,8 +1248,20 @@ export class BookingGraphService {
       'continue',
       'we',
       'not',
+      'notcorrect',
+      'notright',
       'correct',
       'wrong',
+      'thatscorrect',
+      'thatiscorrect',
+      'thatswrong',
+      'thatiswrong',
+      'thatsnotcorrect',
+      'thatisnotcorrect',
+      'itscorrect',
+      'itiscorrect',
+      'itswrong',
+      'itiswrong',
       'right',
       'after',
       'before',

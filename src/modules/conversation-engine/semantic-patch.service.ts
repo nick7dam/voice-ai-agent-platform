@@ -154,6 +154,56 @@ const affirmativePattern =
   /\b(yes|yeah|yep|correct|sure|exactly|sounds right|that(?:'s| is) (?:right|correct)|it(?:'s| is) (?:right|correct))\b/i;
 const negativePattern =
   /\b(no|nope|not correct|not right|wrong|incorrect|not entirely|that's wrong|that is wrong)\b/i;
+const affirmativeConfirmationCompacts = new Set([
+  'yes',
+  'yeah',
+  'yep',
+  'correct',
+  'right',
+  'sure',
+  'exactly',
+  'yescorrect',
+  'yesright',
+  'yesthatscorrect',
+  'yesthatiscorrect',
+  'yesthatsright',
+  'yesthatisright',
+  'thatscorrect',
+  'thatiscorrect',
+  'thatsright',
+  'thatisright',
+  'itscorrect',
+  'itiscorrect',
+  'itsright',
+  'itisright',
+]);
+const negativeConfirmationCompacts = new Set([
+  'no',
+  'nope',
+  'incorrect',
+  'wrong',
+  'notcorrect',
+  'notright',
+  'notentirely',
+  'noitsnot',
+  'noitisnot',
+  'noitsnotcorrect',
+  'noitisnotcorrect',
+  'thatswrong',
+  'thatiswrong',
+  'thatsnotcorrect',
+  'thatisnotcorrect',
+  'thatsnotright',
+  'thatisnotright',
+  'thatsnotit',
+  'thatisnotit',
+  'itswrong',
+  'itiswrong',
+  'itsnotcorrect',
+  'itisnotcorrect',
+  'itsnotright',
+  'itisnotright',
+]);
 const fillerPattern =
   /^(uh|um|hmm|erm|ah|mm|sorry|let me think|one sec|one second|hold on|wait)$/i;
 
@@ -216,12 +266,17 @@ export class SemanticPatchService {
     const promptContext = this.resolvePromptContext(session);
     const normalizedText = committedText.replace(/\s+/g, ' ').trim();
     const lower = normalizedText.toLowerCase();
+    const compactLower = this.compactControlText(lower);
     const promptedConfirmation =
       promptContext.slotKey !== null && promptContext.action === 'confirm';
     const isAffirmativeConfirmation =
-      promptedConfirmation && affirmativePattern.test(lower);
+      promptedConfirmation &&
+      (affirmativePattern.test(lower) ||
+        affirmativeConfirmationCompacts.has(compactLower));
     const isNegativeConfirmation =
-      promptedConfirmation && negativePattern.test(lower);
+      promptedConfirmation &&
+      (negativePattern.test(lower) ||
+        negativeConfirmationCompacts.has(compactLower));
 
     if (promptContext.slotKey && isAffirmativeConfirmation) {
       patches.push({
@@ -280,6 +335,7 @@ export class SemanticPatchService {
     if (!normalized) {
       return true;
     }
+    const compact = this.compactControlText(normalized);
 
     const genericReplies = [
       'yes',
@@ -299,7 +355,15 @@ export class SemanticPatchService {
       'that is wrong',
     ];
 
-    return genericReplies.includes(normalized);
+    return (
+      genericReplies.includes(normalized) ||
+      affirmativeConfirmationCompacts.has(compact) ||
+      negativeConfirmationCompacts.has(compact)
+    );
+  }
+
+  private compactControlText(text: string): string {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, '');
   }
 
   private resolvePromptContext(session: SessionState): PromptContext {
@@ -974,8 +1038,20 @@ export class SemanticPatchService {
       'continue',
       'we',
       'not',
+      'notcorrect',
+      'notright',
       'correct',
       'wrong',
+      'thatscorrect',
+      'thatiscorrect',
+      'thatswrong',
+      'thatiswrong',
+      'thatsnotcorrect',
+      'thatisnotcorrect',
+      'itscorrect',
+      'itiscorrect',
+      'itswrong',
+      'itiswrong',
       'right',
       'after',
       'before',

@@ -130,6 +130,14 @@ SILENCE_MS = int(os.getenv("VOICE_VAD_SILENCE_MS", "420"))
 MAX_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MAX_UTTERANCE_MS", "8000"))
 MIN_UTTERANCE_MS = int(os.getenv("VOICE_VAD_MIN_UTTERANCE_MS", "320"))
 MIN_SPEECH_MS = int(os.getenv("VOICE_VAD_MIN_SPEECH_MS", "240"))
+SHORT_REPLY_MIN_AUDIO_MS = int(os.getenv("VOICE_VAD_SHORT_REPLY_MIN_AUDIO_MS", "70"))
+SHORT_REPLY_MIN_SPEECH_MS = int(os.getenv("VOICE_VAD_SHORT_REPLY_MIN_SPEECH_MS", "60"))
+SHORT_REPLY_MIN_SPEECH_LIKE_MS = int(
+    os.getenv("VOICE_VAD_SHORT_REPLY_MIN_SPEECH_LIKE_MS", "50")
+)
+SHORT_REPLY_SPEECH_LIKELIHOOD_THRESHOLD = float(
+    os.getenv("VOICE_VAD_SHORT_REPLY_SPEECH_LIKELIHOOD_THRESHOLD", "0.24")
+)
 MIN_BARGE_SPEECH_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_SPEECH_MS", "160"))
 MIN_BARGE_AUDIO_MS = int(os.getenv("VOICE_VAD_BARGE_MIN_AUDIO_MS", "120"))
 END_THRESHOLD_PEAK_RATIO = float(os.getenv("VOICE_VAD_END_PEAK_RATIO", "0.35"))
@@ -1223,6 +1231,18 @@ CAPTURE_FILLER_WORDS = {
     "and",
     "for",
     "with",
+    "yes",
+    "yeah",
+    "yep",
+    "no",
+    "nope",
+    "not",
+    "correct",
+    "right",
+    "wrong",
+    "incorrect",
+    "that's",
+    "thats",
     "please",
     "thanks",
     "thank",
@@ -1244,6 +1264,64 @@ CAPTURE_FILLER_WORDS = {
     "spell",
     "spelling",
     "capital",
+}
+
+CONTROL_AFFIRMATIVE_COMPACTS = {
+    "yes",
+    "yeah",
+    "yep",
+    "correct",
+    "right",
+    "sure",
+    "exactly",
+    "ok",
+    "okay",
+    "yescorrect",
+    "yesright",
+    "yesthatscorrect",
+    "yesthatiscorrect",
+    "yesthatsright",
+    "yesthatisright",
+    "yesitiscorrect",
+    "yesitscorrect",
+    "yesitisright",
+    "yesitsright",
+    "thatscorrect",
+    "thatiscorrect",
+    "thatsright",
+    "thatisright",
+    "itscorrect",
+    "itiscorrect",
+    "itsright",
+    "itisright",
+}
+
+CONTROL_NEGATIVE_COMPACTS = {
+    "no",
+    "nope",
+    "incorrect",
+    "wrong",
+    "notcorrect",
+    "notright",
+    "notentirely",
+    "noitsnot",
+    "noitisnot",
+    "noitsnotcorrect",
+    "noitisnotcorrect",
+    "thatswrong",
+    "thatiswrong",
+    "thatsnotcorrect",
+    "thatisnotcorrect",
+    "thatsnotright",
+    "thatisnotright",
+    "thatsnotit",
+    "thatisnotit",
+    "itswrong",
+    "itiswrong",
+    "itsnotcorrect",
+    "itisnotcorrect",
+    "itsnotright",
+    "itisnotright",
 }
 
 
@@ -1427,7 +1505,25 @@ def normalize_customer_name_capture(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def normalize_control_phrase(text: str) -> Optional[str]:
+    compact = re.sub(r"[^a-z0-9]+", "", text.lower())
+    if not compact:
+        return None
+
+    if compact in CONTROL_AFFIRMATIVE_COMPACTS:
+        return "yes, that's correct."
+    if compact in CONTROL_NEGATIVE_COMPACTS:
+        return "no, that's not correct."
+
+    return None
+
+
 def normalize_for_capture_mode(text: str, capture_mode: Optional[str]) -> str:
+    if is_exact_capture_mode(capture_mode):
+        control_phrase = normalize_control_phrase(text)
+        if control_phrase:
+            return control_phrase
+
     if capture_mode == "vehicleRegistration":
         return normalize_vehicle_registration(text)
     if capture_mode == "phoneNumber":
@@ -1474,6 +1570,9 @@ def structured_digit_like_count(text: str) -> int:
 def looks_like_structured_transcript(
     text: str, capture_mode: Optional[str] = None
 ) -> bool:
+    if normalize_control_phrase(text):
+        return False
+
     if is_exact_capture_mode(capture_mode):
         return True
 
@@ -1496,6 +1595,9 @@ def looks_like_structured_transcript(
 def structured_transcript_likely_incomplete(
     text: str, capture_mode: Optional[str] = None
 ) -> bool:
+    if normalize_control_phrase(text):
+        return False
+
     if capture_mode == "vehicleRegistration":
         return len(text) < 4 or not re.search(r"[A-Z]", text)
     if capture_mode == "phoneNumber":
@@ -1530,6 +1632,9 @@ def transcript_looks_complete(text: str, capture_mode: Optional[str] = None) -> 
     if not stripped:
         return False
 
+    if normalize_control_phrase(stripped):
+        return True
+
     if is_exact_capture_mode(capture_mode):
         return capture_mode_is_complete(stripped, capture_mode)
 
@@ -1554,12 +1659,19 @@ def join_transcript_fragments(
     capture_mode: Optional[str] = None,
 ) -> str:
     if is_exact_capture_mode(capture_mode):
+        latest_control_phrase: Optional[str] = None
         combined = ""
         for part in parts:
             fragment = normalize_for_capture_mode(part, capture_mode)
             if not fragment:
                 continue
+            control_phrase = normalize_control_phrase(fragment)
+            if control_phrase:
+                latest_control_phrase = control_phrase
+                continue
             combined = merge_capture_values(combined, fragment)
+        if latest_control_phrase:
+            return latest_control_phrase
         return combined.strip()
 
     cleaned: List[str] = []
@@ -1750,6 +1862,25 @@ class VoiceActivityDetector:
     def exact_capture_mode_active(self) -> bool:
         return is_exact_capture_mode(self.session.current_capture_mode())
 
+    def short_reply_mode_active(self) -> bool:
+        return self.session.is_confirmation_reply_expected()
+
+    def lenient_user_speech_mode_active(self) -> bool:
+        return self.exact_capture_mode_active() or self.short_reply_mode_active()
+
+    def active_speech_likelihood_threshold(self, barge_in: bool) -> float:
+        required_likelihood = self.required_speech_likelihood(barge_in)
+        if barge_in:
+            return required_likelihood
+        if self.short_reply_mode_active():
+            return min(
+                required_likelihood,
+                SHORT_REPLY_SPEECH_LIKELIHOOD_THRESHOLD,
+            )
+        if self.exact_capture_mode_active():
+            return max(0.28, required_likelihood - 0.12)
+        return required_likelihood
+
     def score_speech_likelihood(self, samples: np.ndarray) -> float:
         heuristic_score = estimate_speech_likelihood(samples)
         model_score = self.speech_gate.score(samples)
@@ -1794,11 +1925,17 @@ class VoiceActivityDetector:
         turn.speech_likelihood_frames += 1
 
         peak_threshold = turn.max_level * END_THRESHOLD_PEAK_RATIO
-        speech_threshold = self.required_speech_likelihood(
+        speech_threshold = self.active_speech_likelihood_threshold(
             turn.started_during_assistant
         )
+        level_threshold = max(threshold, peak_threshold)
         if (
-            level >= max(threshold, peak_threshold)
+            not turn.started_during_assistant
+            and self.lenient_user_speech_mode_active()
+        ):
+            level_threshold = max(threshold * 0.85, peak_threshold)
+        if (
+            level >= level_threshold
             and speech_likelihood >= speech_threshold
         ):
             turn.last_voice_at = now
@@ -1839,11 +1976,10 @@ class VoiceActivityDetector:
     ) -> bool:
         if not self.session.is_assistant_interruptible():
             self.barge_candidate_ms = 0
-            required_likelihood = self.required_speech_likelihood(False)
-            if self.exact_capture_mode_active():
-                required_likelihood = max(0.3, required_likelihood - 0.1)
+            required_likelihood = self.active_speech_likelihood_threshold(False)
+            lenient_mode = self.lenient_user_speech_mode_active()
             return (
-                level >= (threshold * 0.85 if self.exact_capture_mode_active() else threshold)
+                level >= (threshold * 0.85 if lenient_mode else threshold)
                 and speech_likelihood >= required_likelihood
             )
 
@@ -1913,6 +2049,10 @@ class VoiceActivityDetector:
         required_speech_likelihood = self.required_speech_likelihood(
             turn.started_during_assistant
         )
+        exact_capture_mode = self.exact_capture_mode_active()
+        short_reply_mode = (
+            self.short_reply_mode_active() and not turn.started_during_assistant
+        )
         if self.exact_capture_mode_active() and not turn.started_during_assistant:
             min_speech = max(80, int(min_speech * 0.5))
             min_audio_ms = max(90, int(min_audio_ms * 0.5))
@@ -1921,12 +2061,30 @@ class VoiceActivityDetector:
             required_speech_likelihood = max(
                 0.28, required_speech_likelihood - 0.12
             )
+        if short_reply_mode:
+            min_speech = min(min_speech, SHORT_REPLY_MIN_SPEECH_MS)
+            min_audio_ms = min(min_audio_ms, SHORT_REPLY_MIN_AUDIO_MS)
+            min_speech_like_ms = min(
+                min_speech_like_ms,
+                SHORT_REPLY_MIN_SPEECH_LIKE_MS,
+            )
+            required_peak = min(
+                required_peak,
+                max(MIN_PEAK_LEVEL * 0.75, turn.threshold_at_start * 0.9),
+            )
+            required_speech_likelihood = min(
+                required_speech_likelihood,
+                SHORT_REPLY_SPEECH_LIKELIHOOD_THRESHOLD,
+            )
         average_speech_likelihood = (
             turn.speech_likelihood_total / turn.speech_likelihood_frames
             if turn.speech_likelihood_frames
             else 0.0
         )
         samples = turn.samples
+        average_likelihood_factor = 0.45 if short_reply_mode else (
+            0.62 if exact_capture_mode else 0.78
+        )
         accepted = (
             samples.size >= int(INPUT_SAMPLE_RATE * min_audio_ms / 1000)
             and turn.speech_ms >= min_speech
@@ -1935,7 +2093,7 @@ class VoiceActivityDetector:
             and turn.max_speech_likelihood >= required_speech_likelihood
             and average_speech_likelihood
             >= required_speech_likelihood
-            * (0.62 if self.exact_capture_mode_active() else 0.78)
+            * average_likelihood_factor
         )
 
         if not accepted:
@@ -1955,6 +2113,8 @@ class VoiceActivityDetector:
                         "requiredSpeechLikelihood": round(
                             required_speech_likelihood, 4
                         ),
+                        "shortReplyMode": short_reply_mode,
+                        "captureMode": self.session.current_capture_mode(),
                     },
                 }
             )
@@ -2622,6 +2782,9 @@ class VoiceSession:
     def current_capture_mode(self) -> Optional[str]:
         return self.policy_capture_mode
 
+    def is_confirmation_reply_expected(self) -> bool:
+        return self.policy_action == "confirm"
+
     def build_stt_initial_prompt(self) -> Optional[str]:
         parts: List[str] = []
         capture_mode = self.current_capture_mode()
@@ -2825,6 +2988,42 @@ class VoiceSession:
         text = join_transcript_fragments(pending.parts, pending.capture_mode)
         if not text:
             return
+
+        now = time.perf_counter()
+        incomplete_exact_capture = (
+            reason == "timer"
+            and is_exact_capture_mode(pending.capture_mode)
+            and structured_transcript_likely_incomplete(text, pending.capture_mode)
+        )
+        if incomplete_exact_capture and TRANSCRIPT_MAX_COALESCE_MS > 0:
+            elapsed_coalesce_ms = int((now - pending.first_part_at) * 1000)
+            remaining_ms = TRANSCRIPT_MAX_COALESCE_MS - elapsed_coalesce_ms
+            if remaining_ms > 0:
+                self.pending_transcript = pending
+                delay_ms = max(
+                    100,
+                    min(
+                        self.transcript_commit_delay_ms(text, pending.capture_mode),
+                        remaining_ms,
+                    ),
+                )
+                self.schedule_pending_transcript_commit(delay_ms)
+                await self.send_browser_event(
+                    {
+                        "type": "gateway.transcript.pending_resumed",
+                        "timestamp": now_iso(),
+                        "payload": {
+                            "text": text,
+                            "parts": len(pending.parts),
+                            "reason": "incomplete_exact_capture_hold",
+                            "delayMs": delay_ms,
+                            "elapsedMs": elapsed_coalesce_ms,
+                            "incompleteStructured": True,
+                            "captureMode": pending.capture_mode,
+                        },
+                    }
+                )
+                return
 
         logger.info(
             "voice.transcript.commit reason=%s parts=%d chars=%d structured=%s",

@@ -138,7 +138,7 @@ describe('BookingGraphService', () => {
       session,
       task,
       'turn-3',
-      "Yes, that's correct.",
+      'THATSCORRECT',
     );
 
     expect(third.decision.action).toBe('ask');
@@ -362,7 +362,7 @@ describe('BookingGraphService', () => {
       session,
       task,
       'turn-3',
-      "No, it's not.",
+      'NOTCORRECT',
     );
 
     expect(third.decision.action).toBe('ask');
