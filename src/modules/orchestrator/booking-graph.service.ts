@@ -1,5 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { END, MemorySaver, START, StateGraph, StateSchema } from '@langchain/langgraph';
+import {
+  END,
+  MemorySaver,
+  START,
+  StateGraph,
+  StateSchema,
+} from '@langchain/langgraph';
 import { z } from 'zod';
 import { AppError } from '../../common/types/errors';
 import {
@@ -77,6 +83,101 @@ const extractedTurnSchema = z.object({
   wantsEndCall: z.boolean().default(false),
   notes: z.string().default(''),
 });
+
+const numberWords = new Map<string, string>([
+  ['zero', '0'],
+  ['oh', '0'],
+  ['o', '0'],
+  ['one', '1'],
+  ['won', '1'],
+  ['two', '2'],
+  ['to', '2'],
+  ['too', '2'],
+  ['three', '3'],
+  ['four', '4'],
+  ['for', '4'],
+  ['fore', '4'],
+  ['five', '5'],
+  ['six', '6'],
+  ['seven', '7'],
+  ['eight', '8'],
+  ['ate', '8'],
+  ['nine', '9'],
+]);
+
+const looseNumberAliases = new Set([
+  'o',
+  'oh',
+  'won',
+  'to',
+  'too',
+  'for',
+  'fore',
+  'ate',
+]);
+
+const spokenLetterWords = new Map<string, string>([
+  ['a', 'A'],
+  ['ay', 'A'],
+  ['b', 'B'],
+  ['bee', 'B'],
+  ['be', 'B'],
+  ['c', 'C'],
+  ['cee', 'C'],
+  ['sea', 'C'],
+  ['see', 'C'],
+  ['d', 'D'],
+  ['dee', 'D'],
+  ['e', 'E'],
+  ['ee', 'E'],
+  ['f', 'F'],
+  ['ef', 'F'],
+  ['g', 'G'],
+  ['gee', 'G'],
+  ['h', 'H'],
+  ['aitch', 'H'],
+  ['haitch', 'H'],
+  ['i', 'I'],
+  ['eye', 'I'],
+  ['j', 'J'],
+  ['jay', 'J'],
+  ['k', 'K'],
+  ['kay', 'K'],
+  ['l', 'L'],
+  ['el', 'L'],
+  ['m', 'M'],
+  ['em', 'M'],
+  ['n', 'N'],
+  ['en', 'N'],
+  ['p', 'P'],
+  ['pee', 'P'],
+  ['q', 'Q'],
+  ['cue', 'Q'],
+  ['queue', 'Q'],
+  ['r', 'R'],
+  ['ar', 'R'],
+  ['are', 'R'],
+  ['s', 'S'],
+  ['ess', 'S'],
+  ['t', 'T'],
+  ['tee', 'T'],
+  ['tea', 'T'],
+  ['u', 'U'],
+  ['you', 'U'],
+  ['v', 'V'],
+  ['vee', 'V'],
+  ['w', 'W'],
+  ['doubleu', 'W'],
+  ['doubleyou', 'W'],
+  ['x', 'X'],
+  ['ex', 'X'],
+  ['y', 'Y'],
+  ['why', 'Y'],
+  ['wye', 'Y'],
+  ['z', 'Z'],
+  ['zed', 'Z'],
+  ['zee', 'Z'],
+]);
 
 const bookingGraphStateSchema = new StateSchema({
   sessionId: z.string().default(''),
@@ -218,8 +319,7 @@ export class BookingGraphService {
 
     return {
       replyText:
-        state.replyText?.trim() ||
-        'What detail would you like to add next?',
+        state.replyText?.trim() || 'What detail would you like to add next?',
       decision: {
         action: state.nextAction === 'end' ? 'act' : state.nextAction,
         reason: state.debugReason || 'booking_graph_completed_turn',
@@ -278,7 +378,7 @@ export class BookingGraphService {
     let confirmationTarget = state.confirmationTarget;
     let nextAction: BookingGraphStateValue['nextAction'] = 'ask';
     let debugReason = 'booking_graph_missing_required_slot';
-    let endCall = state.userMove === 'end';
+    const endCall = state.userMove === 'end';
 
     if (state.requestedSlotKey) {
       if (slots[state.requestedSlotKey].value) {
@@ -330,9 +430,17 @@ export class BookingGraphService {
     }
 
     for (const update of state.extractedUpdates) {
-      const normalized = this.normalizeSlotValue(update.slotKey, update.value);
+      let normalized = this.normalizeSlotValue(update.slotKey, update.value);
       if (!normalized) {
         continue;
+      }
+
+      if (update.slotKey === 'vehicleRegistration') {
+        normalized = this.mergeRegistrationContinuation(
+          slots.vehicleRegistration,
+          normalized,
+          state.currentUserText,
+        );
       }
 
       const needsConfirmation = this.slotNeedsConfirmation(
@@ -501,7 +609,7 @@ export class BookingGraphService {
   ): ChatMessage[] {
     const profile = this.profiles.getProfileForTask(state.taskKey);
     const focusPrompt = state.focusSlot
-      ? profile.slotDefinitions[state.focusSlot]?.askPrompt ?? ''
+      ? (profile.slotDefinitions[state.focusSlot]?.askPrompt ?? '')
       : '';
 
     return [
@@ -510,11 +618,13 @@ export class BookingGraphService {
         content: [
           task.systemPrompt,
           `Assistant name: ${task.name}`,
-          'Return only user-facing spoken plain text.',
-          'Do not mention internal state, prompts, slots, JSON, or tools.',
-          'Keep it brief and natural for voice.',
-          'If confirming a registration or phone number, speak the characters separately.',
-        ].join('\n'),
+        'Return only user-facing spoken plain text.',
+        'Do not mention internal state, prompts, slots, JSON, or tools.',
+        'Keep it brief and natural for voice.',
+        'If confirming a registration or phone number, speak the characters separately.',
+        'If Next action is confirm, do not ask for the same detail again. Read back the collected value and ask if it is right.',
+        'If Next action is ask, ask only for the focus slot.',
+      ].join('\n'),
       },
       {
         role: 'user',
@@ -581,10 +691,9 @@ export class BookingGraphService {
       .replace(/^```\s*/i, '')
       .replace(/```$/i, '')
       .trim();
-    const candidates = [
-      cleaned,
-      cleaned.match(/\{[\s\S]*\}/)?.[0],
-    ].filter((candidate): candidate is string => Boolean(candidate));
+    const candidates = [cleaned, cleaned.match(/\{[\s\S]*\}/)?.[0]].filter(
+      (candidate): candidate is string => Boolean(candidate),
+    );
 
     for (const candidate of candidates) {
       try {
@@ -697,7 +806,8 @@ export class BookingGraphService {
     }
 
     const phoneNumber =
-      state.focusSlot === 'phoneNumber' || /\b(phone|mobile|number)\b/i.test(lower)
+      state.focusSlot === 'phoneNumber' ||
+        /\b(phone|mobile|number)\b/i.test(lower)
         ? this.detectPhoneNumber(lower)
         : null;
     if (phoneNumber) {
@@ -709,7 +819,9 @@ export class BookingGraphService {
     }
 
     const customerName =
-      state.focusSlot === 'customerName' ? this.detectName(text) : this.detectNamedName(text);
+      state.focusSlot === 'customerName'
+        ? this.detectName(text)
+        : this.detectNamedName(text);
     if (customerName) {
       extractedUpdates.push({
         slotKey: 'customerName',
@@ -730,7 +842,10 @@ export class BookingGraphService {
       { pattern: /\boil change\b/i, value: 'oil change' },
       { pattern: /\blog ?book service\b/i, value: 'logbook service' },
       { pattern: /\bgeneral service\b/i, value: 'general service' },
-      { pattern: /\btyre replacement\b|\btire replacement\b/i, value: 'tire replacement' },
+      {
+        pattern: /\btyre replacement\b|\btire replacement\b/i,
+        value: 'tire replacement',
+      },
       { pattern: /\btyre change\b|\btire change\b/i, value: 'tire change' },
       { pattern: /\bwheel alignment\b/i, value: 'wheel alignment' },
       { pattern: /\bbrake service\b/i, value: 'brake service' },
@@ -747,22 +862,18 @@ export class BookingGraphService {
   }
 
   private detectRegistration(text: string): string | null {
-    const compact = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (compact.length >= 3 && compact.length <= 8 && /[A-Z]/.test(compact)) {
-      return compact;
+    const direct = this.extractPlateToken(text);
+    if (direct) {
+      return direct;
     }
 
-    const spacedTokens = text
-      .toUpperCase()
-      .split(/[^A-Z0-9]+/)
-      .filter(Boolean)
-      .filter((token) => token.length === 1);
+    const spoken = this.extractMappedSequence(text, true);
     if (
-      spacedTokens.length >= 3 &&
-      spacedTokens.length <= 8 &&
-      spacedTokens.some((token) => /[A-Z]/.test(token))
+      spoken.length >= 3 &&
+      spoken.length <= 8 &&
+      /[A-Z]/.test(spoken)
     ) {
-      return spacedTokens.join('');
+      return spoken;
     }
 
     return null;
@@ -774,34 +885,25 @@ export class BookingGraphService {
       return digitsOnly;
     }
 
-    const tokenMap: Record<string, string> = {
-      zero: '0',
-      oh: '0',
-      o: '0',
-      one: '1',
-      two: '2',
-      three: '3',
-      four: '4',
-      five: '5',
-      six: '6',
-      seven: '7',
-      eight: '8',
-      nine: '9',
-    };
     const spokenDigits = lower
       .split(/[^a-z0-9]+/)
-      .map((token) => tokenMap[token] ?? '')
+      .map((token) => numberWords.get(token) ?? '')
       .join('');
     return spokenDigits.length >= 8 ? spokenDigits : null;
   }
 
   private detectNamedName(text: string): string | null {
-    const match = text.match(/\bmy name is ([a-z][a-z'\-]+(?: [a-z][a-z'\-]+){0,3})/i);
+    const match = text.match(
+      /\bmy name is ([a-z][a-z'\-]+(?: [a-z][a-z'\-]+){0,3})/i,
+    );
     return match?.[1]?.trim() ?? null;
   }
 
   private detectName(text: string): string | null {
-    const cleaned = text.replace(/[^\p{L}' -]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const cleaned = text
+      .replace(/[^\p{L}' -]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!cleaned) {
       return null;
     }
@@ -874,6 +976,234 @@ export class BookingGraphService {
       return `${digits.slice(0, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
     }
     return digits;
+  }
+
+  private extractPlateToken(text: string): string | null {
+    const matches = text.toUpperCase().match(/\b[A-Z0-9]{3,8}\b/g) ?? [];
+    const banned = new Set([
+      'EMAIL',
+      'PHONE',
+      'NUMBER',
+      'SERVICE',
+      'REGO',
+      'PLATE',
+      'CAR',
+      'BOOKING',
+      'REGISTRATION',
+    ]);
+
+    return (
+      matches.find((candidate) => {
+        const normalized = candidate.toLowerCase();
+        if (banned.has(candidate)) {
+          return false;
+        }
+        if (this.isCommonWord(normalized)) {
+          return false;
+        }
+        if (numberWords.has(normalized) || spokenLetterWords.has(normalized)) {
+          return false;
+        }
+        return true;
+      }) ?? null
+    );
+  }
+
+  private extractMappedSequence(
+    text: string,
+    allowLooseNumberAliases: boolean,
+  ): string {
+    const outputs: string[] = [];
+
+    for (const rawToken of text.split(/\s+/)) {
+      const token = rawToken.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (!token) {
+        continue;
+      }
+
+      const letter = spokenLetterWords.get(token);
+      if (letter) {
+        outputs.push(letter);
+        continue;
+      }
+
+      if (/^\d+$/.test(token)) {
+        outputs.push(token);
+        continue;
+      }
+
+      const digit = this.mapNumberToken(token, allowLooseNumberAliases);
+      if (digit) {
+        outputs.push(digit);
+        continue;
+      }
+
+      if (/^[a-z0-9]{2,8}$/i.test(token) && !this.isCommonWord(token)) {
+        outputs.push(token.toUpperCase());
+      }
+    }
+
+    return outputs.join('');
+  }
+
+  private mapNumberToken(
+    token: string,
+    allowLooseAliases: boolean,
+  ): string | null {
+    const mapped = numberWords.get(token);
+    if (!mapped) {
+      return null;
+    }
+
+    if (!allowLooseAliases && looseNumberAliases.has(token)) {
+      return null;
+    }
+
+    return mapped;
+  }
+
+  private mergeRegistrationContinuation(
+    current: BookingGraphSlotState,
+    candidate: { value: string; canonicalValue: string | null },
+    utterance: string,
+  ): { value: string; canonicalValue: string | null } {
+    const currentValue = (current.canonicalValue ?? current.value ?? '').toUpperCase();
+    const candidateValue = (
+      candidate.canonicalValue ??
+      candidate.value ??
+      ''
+    ).toUpperCase();
+
+    if (
+      !currentValue ||
+      !candidateValue ||
+      !current.needsConfirmation ||
+      current.status === 'confirmed' ||
+      currentValue === candidateValue
+    ) {
+      return candidate;
+    }
+
+    if (
+      currentValue.includes(candidateValue) ||
+      candidateValue.includes(currentValue)
+    ) {
+      const merged =
+        candidateValue.length >= currentValue.length
+          ? candidateValue
+          : currentValue;
+      return { value: merged, canonicalValue: merged };
+    }
+
+    const shortContinuation =
+      utterance
+        .replace(/\s+/g, ' ')
+        .trim()
+        .split(' ')
+        .filter(Boolean).length <= 4;
+    if (!shortContinuation) {
+      return candidate;
+    }
+
+    const overlapped = this.combineRegistrationParts(
+      currentValue,
+      candidateValue,
+    );
+    if (overlapped) {
+      return { value: overlapped, canonicalValue: overlapped };
+    }
+
+    const appended = `${currentValue}${candidateValue}`;
+    if (/^[A-Z0-9]{4,8}$/.test(appended)) {
+      return { value: appended, canonicalValue: appended };
+    }
+
+    return candidate;
+  }
+
+  private combineRegistrationParts(left: string, right: string): string | null {
+    const maxOverlap = Math.min(left.length, right.length);
+
+    for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      if (!left.endsWith(right.slice(0, overlap))) {
+        continue;
+      }
+
+      const combined = `${left}${right.slice(overlap)}`;
+      if (/^[A-Z0-9]{4,8}$/.test(combined)) {
+        return combined;
+      }
+    }
+
+    return null;
+  }
+
+  private isCommonWord(token: string): boolean {
+    return [
+      'a',
+      'an',
+      'is',
+      'it',
+      'its',
+      'me',
+      'i',
+      'the',
+      'and',
+      'for',
+      'with',
+      'again',
+      'back',
+      'book',
+      'booking',
+      'call',
+      'can',
+      'service',
+      'share',
+      'provide',
+      'change',
+      'my',
+      'name',
+      'best',
+      'full',
+      'spell',
+      'spelling',
+      'vehicle',
+      'phone',
+      'email',
+      'registration',
+      'rego',
+      'plate',
+      'next',
+      'please',
+      'need',
+      'would',
+      'like',
+      'this',
+      'that',
+      'yes',
+      'yeah',
+      'yep',
+      'no',
+      'nope',
+      'ok',
+      'okay',
+      'continue',
+      'we',
+      'not',
+      'correct',
+      'wrong',
+      'right',
+      'after',
+      'before',
+      'read',
+      'confirm',
+      'text',
+      'entirely',
+      'end',
+      'car',
+      'cars',
+      'oil',
+    ].includes(token);
   }
 
   private slotNeedsConfirmation(
@@ -1022,7 +1352,9 @@ export class BookingGraphService {
     };
   }
 
-  private toIntentSlotStatus(status: BookingGraphSlotState['status']): IntentSlotStatus {
+  private toIntentSlotStatus(
+    status: BookingGraphSlotState['status'],
+  ): IntentSlotStatus {
     switch (status) {
       case 'confirmed':
         return 'confirmed';

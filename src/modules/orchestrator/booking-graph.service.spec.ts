@@ -172,6 +172,126 @@ describe('BookingGraphService', () => {
     expect(result.decision.slotKey).toBe('vehicleRegistration');
   });
 
+  it('parses mixed spoken vehicle registration phrases when structured extraction is unusable', async () => {
+    const { sessions, tasks, reasoning, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+    const task = tasks.get('car_booking_receptionist');
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'What is the vehicle registration?',
+    );
+
+    const first = await service.processTurn(
+      session,
+      task,
+      'turn-1',
+      'Oil change.',
+    );
+
+    sessions.appendHistory(session.id, {
+      role: 'user',
+      text: 'Oil change.',
+      at: new Date().toISOString(),
+      turnId: 'turn-1',
+    });
+    sessions.appendHistory(session.id, {
+      role: 'assistant',
+      text: first.replyText,
+      at: new Date().toISOString(),
+      turnId: 'turn-1',
+    });
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'I have the vehicle registration as 4 Z X 2 B X. Is that right?',
+    );
+
+    const second = await service.processTurn(
+      session,
+      task,
+      'turn-2',
+      'Four Z X Two bx.',
+    );
+
+    expect(second.state.slots.vehicleRegistration.value).toBe('4ZX2BX');
+    expect(second.state.slots.vehicleRegistration.status).toBe('provisional');
+    expect(second.decision.action).toBe('confirm');
+    expect(second.decision.slotKey).toBe('vehicleRegistration');
+  });
+
+  it('merges short follow-up registration fragments onto a provisional registration', async () => {
+    const { sessions, tasks, reasoning, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+    const task = tasks.get('car_booking_receptionist');
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'What is the vehicle registration?',
+    );
+
+    const first = await service.processTurn(
+      session,
+      task,
+      'turn-1',
+      'Oil change.',
+    );
+
+    sessions.appendHistory(session.id, {
+      role: 'user',
+      text: 'Oil change.',
+      at: new Date().toISOString(),
+      turnId: 'turn-1',
+    });
+    sessions.appendHistory(session.id, {
+      role: 'assistant',
+      text: first.replyText,
+      at: new Date().toISOString(),
+      turnId: 'turn-1',
+    });
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'I have the vehicle registration as 4 Z X. Is that right?',
+    );
+
+    const second = await service.processTurn(
+      session,
+      task,
+      'turn-2',
+      'Four Z X.',
+    );
+
+    sessions.appendHistory(session.id, {
+      role: 'user',
+      text: 'Four Z X.',
+      at: new Date().toISOString(),
+      turnId: 'turn-2',
+    });
+    sessions.appendHistory(session.id, {
+      role: 'assistant',
+      text: second.replyText,
+      at: new Date().toISOString(),
+      turnId: 'turn-2',
+    });
+
+    reasoning.enqueue(
+      'not valid json at all',
+      'I have the vehicle registration as 4 Z X 2 B X. Is that right?',
+    );
+
+    const third = await service.processTurn(
+      session,
+      task,
+      'turn-3',
+      'X two bx.',
+    );
+
+    expect(third.state.slots.vehicleRegistration.value).toBe('4ZX2BX');
+    expect(third.decision.action).toBe('confirm');
+    expect(third.decision.slotKey).toBe('vehicleRegistration');
+  });
+
   it('clears a provisional registration when the caller rejects it', async () => {
     const { sessions, tasks, reasoning, service } = createService();
     const session = sessions.create('car_booking_receptionist');
