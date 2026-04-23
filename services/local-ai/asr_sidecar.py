@@ -1,4 +1,5 @@
 import base64
+import inspect
 import json
 import logging
 import os
@@ -115,10 +116,29 @@ def get_qwen_asr_model() -> Any:
     return qwen_asr_model
 
 
+def call_with_supported_kwargs(fn: Any, **kwargs: Any) -> Any:
+    signature = inspect.signature(fn)
+    explicit_params = {
+        name
+        for name, param in signature.parameters.items()
+        if param.kind
+        in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+
+    filtered = {key: value for key, value in kwargs.items() if key in explicit_params}
+    return fn(**filtered)
+
+
 def transcribe_pcm16_base64(
     samples_b64: str,
     sample_rate: int,
     language: Optional[str],
+    initial_prompt: Optional[str],
+    hotwords: Optional[str],
+    capture_mode: Optional[str],
 ) -> Dict[str, Any]:
     started_at = time.perf_counter()
     pcm_bytes = base64.b64decode(samples_b64)
@@ -126,9 +146,19 @@ def transcribe_pcm16_base64(
     samples = samples_i16.astype(np.float32) / 32768.0
 
     with model_lock:
-        results = get_qwen_asr_model().transcribe(
+        prompt_parts = [part for part in [initial_prompt, hotwords] if part]
+        prompt_text = ". ".join(prompt_parts).strip() or None
+        results = call_with_supported_kwargs(
+            get_qwen_asr_model().transcribe,
             audio=(samples, sample_rate),
             language=resolve_qwen_asr_language(language),
+            prompt=prompt_text,
+            initial_prompt=prompt_text,
+            instructions=prompt_text,
+            hotwords=hotwords,
+            hotword=hotwords,
+            keywords=hotwords,
+            capture_mode=capture_mode,
         )
 
     first = results[0] if results else None
@@ -187,10 +217,17 @@ class AsrHandler(BaseHTTPRequestHandler):
 
             sample_rate = int(body.get("sampleRate") or 16000)
             language = body.get("language")
-            # These fields are forwarded by the gateway for future compatibility.
-            body.get("initialPrompt")
-            body.get("hotwords")
-            result = transcribe_pcm16_base64(samples_b64, sample_rate, language)
+            initial_prompt = str(body.get("initialPrompt") or "").strip() or None
+            hotwords = str(body.get("hotwords") or "").strip() or None
+            capture_mode = str(body.get("captureMode") or "").strip() or None
+            result = transcribe_pcm16_base64(
+                samples_b64,
+                sample_rate,
+                language,
+                initial_prompt,
+                hotwords,
+                capture_mode,
+            )
             self.send_json(HTTPStatus.OK, result)
         except Exception as exc:
             logger.exception("asr.transcribe.error error=%s", exc)

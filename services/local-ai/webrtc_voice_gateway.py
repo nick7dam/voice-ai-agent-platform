@@ -369,6 +369,7 @@ def transcribe_with_asr_sidecar(
     samples: np.ndarray,
     initial_prompt: Optional[str] = None,
     hotwords: Optional[str] = None,
+    capture_mode: Optional[str] = None,
 ) -> Tuple[str, int]:
     clipped = np.clip(samples, -1.0, 1.0)
     pcm16 = (clipped * 32767.0).astype(np.int16)
@@ -378,6 +379,7 @@ def transcribe_with_asr_sidecar(
         "language": STT_LANGUAGE,
         "initialPrompt": initial_prompt,
         "hotwords": hotwords,
+        "captureMode": capture_mode,
     }
     request = urllib.request.Request(
         asr_sidecar_url("/transcribe"),
@@ -841,6 +843,7 @@ def transcribe_samples(
     samples: np.ndarray,
     initial_prompt: Optional[str] = None,
     hotwords: Optional[str] = None,
+    capture_mode: Optional[str] = None,
 ) -> Tuple[str, int]:
     backend = resolve_stt_backend()
 
@@ -849,6 +852,7 @@ def transcribe_samples(
             samples,
             initial_prompt,
             hotwords,
+            capture_mode,
         )
         return text, latency_ms
 
@@ -1062,28 +1066,392 @@ class PendingTranscript:
     metric: TurnLatency
     first_part_at: float
     structured: bool = False
+    capture_mode: Optional[str] = None
 
 
-NUMBER_WORDS = {
-    "zero",
+NUMBER_WORD_MAP = {
+    "zero": "0",
+    "oh": "0",
+    "o": "0",
+    "one": "1",
+    "won": "1",
+    "two": "2",
+    "to": "2",
+    "too": "2",
+    "three": "3",
+    "four": "4",
+    "for": "4",
+    "fore": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "ate": "8",
+    "nine": "9",
+}
+
+LOOSE_NUMBER_ALIASES = {
+    "o",
     "oh",
-    "one",
-    "two",
-    "three",
-    "four",
-    "five",
-    "six",
-    "seven",
-    "eight",
-    "nine",
-    "ten",
-    "double",
-    "triple",
+    "won",
+    "to",
+    "too",
+    "for",
+    "fore",
+    "ate",
+}
+
+NUMBER_WORDS = set(NUMBER_WORD_MAP) | {"ten", "double", "triple"}
+
+SPOKEN_LETTER_MAP = {
+    "a": "A",
+    "ay": "A",
+    "alpha": "A",
+    "b": "B",
+    "bee": "B",
+    "be": "B",
+    "bravo": "B",
+    "c": "C",
+    "cee": "C",
+    "sea": "C",
+    "see": "C",
+    "charlie": "C",
+    "d": "D",
+    "dee": "D",
+    "delta": "D",
+    "e": "E",
+    "ee": "E",
+    "echo": "E",
+    "f": "F",
+    "ef": "F",
+    "foxtrot": "F",
+    "g": "G",
+    "gee": "G",
+    "golf": "G",
+    "h": "H",
+    "aitch": "H",
+    "haitch": "H",
+    "hotel": "H",
+    "i": "I",
+    "eye": "I",
+    "india": "I",
+    "j": "J",
+    "jay": "J",
+    "juliet": "J",
+    "juliett": "J",
+    "k": "K",
+    "kay": "K",
+    "kilo": "K",
+    "l": "L",
+    "el": "L",
+    "lima": "L",
+    "m": "M",
+    "em": "M",
+    "mike": "M",
+    "n": "N",
+    "en": "N",
+    "november": "N",
+    "p": "P",
+    "pee": "P",
+    "papa": "P",
+    "q": "Q",
+    "cue": "Q",
+    "queue": "Q",
+    "quebec": "Q",
+    "r": "R",
+    "ar": "R",
+    "are": "R",
+    "romeo": "R",
+    "s": "S",
+    "ess": "S",
+    "sierra": "S",
+    "t": "T",
+    "tee": "T",
+    "tea": "T",
+    "tango": "T",
+    "u": "U",
+    "you": "U",
+    "uniform": "U",
+    "v": "V",
+    "vee": "V",
+    "victor": "V",
+    "w": "W",
+    "doubleu": "W",
+    "doubleyou": "W",
+    "whiskey": "W",
+    "x": "X",
+    "ex": "X",
+    "xray": "X",
+    "x-ray": "X",
+    "y": "Y",
+    "why": "Y",
+    "wye": "Y",
+    "yankee": "Y",
+    "z": "Z",
+    "zed": "Z",
+    "zee": "Z",
+    "zulu": "Z",
+}
+
+CAPTURE_SYMBOL_MAP = {
+    "dash": "-",
+    "hyphen": "-",
+    "minus": "-",
+    "slash": "/",
+    "forwardslash": "/",
+    "forward-slash": "/",
+    "backslash": "\\",
+    "dot": ".",
+    "period": ".",
+    "point": ".",
+    "underscore": "_",
+    "under_score": "_",
+    "plus": "+",
+    "space": " ",
+    "at": "@",
+}
+
+CAPTURE_FILLER_WORDS = {
+    "my",
+    "is",
+    "its",
+    "it's",
+    "it",
+    "the",
+    "a",
+    "an",
+    "and",
+    "for",
+    "with",
+    "please",
+    "thanks",
+    "thank",
+    "booking",
+    "service",
+    "number",
+    "phone",
+    "mobile",
+    "email",
+    "name",
+    "registration",
+    "rego",
+    "plate",
+    "vehicle",
+    "letters",
+    "letter",
+    "digits",
+    "digit",
+    "spell",
+    "spelling",
+    "capital",
 }
 
 
 def transcript_word_count(text: str) -> int:
     return len(re.findall(r"\b[\w']+\b", text))
+
+
+def capture_mode_for_policy(
+    slot_key: Optional[str],
+    action: Optional[str],
+) -> Optional[str]:
+    if action not in {"ask", "confirm"}:
+        return None
+
+    mapping = {
+        "vehicleRegistration": "vehicleRegistration",
+        "phoneNumber": "phoneNumber",
+        "customerEmail": "customerEmail",
+    }
+    return mapping.get(slot_key or "")
+
+
+def is_exact_capture_mode(capture_mode: Optional[str]) -> bool:
+    return capture_mode in {
+        "vehicleRegistration",
+        "phoneNumber",
+        "customerEmail",
+    }
+
+
+def normalize_capture_token(raw_token: str) -> str:
+    return raw_token.strip().lower().replace("'", "")
+
+
+def token_is_capture_filler(token: str) -> bool:
+    return token in CAPTURE_FILLER_WORDS
+
+
+def map_number_token(token: str, allow_loose_aliases: bool) -> Optional[str]:
+    mapped = NUMBER_WORD_MAP.get(token)
+    if mapped is None:
+        return None
+    if not allow_loose_aliases and token in LOOSE_NUMBER_ALIASES:
+        return None
+    return mapped
+
+
+def merge_capture_values(existing: str, new_value: str) -> str:
+    if not existing:
+        return new_value
+    if not new_value:
+        return existing
+    if existing == new_value:
+        return existing
+    if existing in new_value:
+        return new_value
+    if new_value in existing:
+        return existing
+
+    max_overlap = min(len(existing), len(new_value))
+    for overlap in range(max_overlap, 0, -1):
+        if existing.endswith(new_value[:overlap]):
+            return existing + new_value[overlap:]
+
+    return existing + new_value
+
+
+def parse_capture_sequence(
+    text: str,
+    *,
+    allow_letters: bool,
+    allow_digits: bool,
+    allow_symbols: bool,
+    allow_loose_number_aliases: bool,
+    uppercase_chunks: bool,
+    preserve_spaces: bool,
+) -> str:
+    outputs: List[str] = []
+    repeat_count = 1
+
+    for raw_token in text.split():
+        token = normalize_capture_token(raw_token)
+        if not token:
+            continue
+
+        if token == "double":
+            repeat_count = 2
+            continue
+        if token == "triple":
+            repeat_count = 3
+            continue
+
+        emitted: Optional[str] = None
+
+        if allow_symbols and token in CAPTURE_SYMBOL_MAP:
+            emitted = CAPTURE_SYMBOL_MAP[token]
+        elif allow_letters and token in SPOKEN_LETTER_MAP:
+            emitted = SPOKEN_LETTER_MAP[token]
+        elif allow_digits and token.isdigit():
+            emitted = token
+        elif allow_digits:
+            emitted = map_number_token(token, allow_loose_number_aliases)
+
+        if emitted is None and re.fullmatch(r"[a-z0-9._%+\-/\\]+", token):
+            if not token_is_capture_filler(token):
+                emitted = token.upper() if uppercase_chunks else token.lower()
+
+        if emitted is None:
+            repeat_count = 1
+            continue
+
+        for _ in range(repeat_count):
+            outputs.append(emitted)
+        repeat_count = 1
+
+    if preserve_spaces:
+        return "".join(outputs)
+
+    return "".join(part for part in outputs if part != " ")
+
+
+def normalize_vehicle_registration(text: str) -> str:
+    direct = parse_capture_sequence(
+        text,
+        allow_letters=True,
+        allow_digits=True,
+        allow_symbols=False,
+        allow_loose_number_aliases=True,
+        uppercase_chunks=True,
+        preserve_spaces=False,
+    )
+    return re.sub(r"[^A-Z0-9]", "", direct)
+
+
+def normalize_phone_number(text: str) -> str:
+    normalized = parse_capture_sequence(
+        text,
+        allow_letters=False,
+        allow_digits=True,
+        allow_symbols=True,
+        allow_loose_number_aliases=True,
+        uppercase_chunks=False,
+        preserve_spaces=False,
+    )
+    return re.sub(r"[^0-9+]", "", normalized)
+
+
+def normalize_email_capture(text: str) -> str:
+    normalized = parse_capture_sequence(
+        text,
+        allow_letters=True,
+        allow_digits=True,
+        allow_symbols=True,
+        allow_loose_number_aliases=False,
+        uppercase_chunks=False,
+        preserve_spaces=True,
+    )
+    return normalized.replace(" ", "").lower()
+
+
+def normalize_customer_name_capture(text: str) -> str:
+    words = [normalize_capture_token(token) for token in text.split()]
+    spelled_like = [
+        token
+        for token in words
+        if token in SPOKEN_LETTER_MAP or re.fullmatch(r"[a-z]", token)
+    ]
+    if words and len(spelled_like) >= max(2, int(len(words) * 0.6)):
+        letters = parse_capture_sequence(
+            text,
+            allow_letters=True,
+            allow_digits=False,
+            allow_symbols=False,
+            allow_loose_number_aliases=False,
+            uppercase_chunks=True,
+            preserve_spaces=False,
+        )
+        return letters.title()
+
+    cleaned = re.sub(r"[^\w' -]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def normalize_for_capture_mode(text: str, capture_mode: Optional[str]) -> str:
+    if capture_mode == "vehicleRegistration":
+        return normalize_vehicle_registration(text)
+    if capture_mode == "phoneNumber":
+        return normalize_phone_number(text)
+    if capture_mode == "customerEmail":
+        return normalize_email_capture(text)
+    if capture_mode == "customerName":
+        return normalize_customer_name_capture(text)
+    return clean_transcript_fragment(text)
+
+
+def capture_mode_is_complete(text: str, capture_mode: Optional[str]) -> bool:
+    if capture_mode == "vehicleRegistration":
+        return bool(
+            len(text) >= 4 and re.search(r"[A-Z]", text) and re.search(r"\d", text)
+        )
+    if capture_mode == "phoneNumber":
+        digits = re.sub(r"\D", "", text)
+        return len(digits) >= 8
+    if capture_mode == "customerEmail":
+        return bool(re.fullmatch(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", text))
+    if capture_mode == "customerName":
+        return len(text.replace(" ", "")) >= 2
+    return False
 
 
 def structured_digit_like_count(text: str) -> int:
@@ -1103,7 +1471,12 @@ def structured_digit_like_count(text: str) -> int:
     return digit_count + word_count
 
 
-def looks_like_structured_transcript(text: str) -> bool:
+def looks_like_structured_transcript(
+    text: str, capture_mode: Optional[str] = None
+) -> bool:
+    if is_exact_capture_mode(capture_mode):
+        return True
+
     lower = text.lower()
     if re.search(
         r"\b(phone|mobile|number|rego|registration|plate|licen[cs]e|vin|address|postcode)\b",
@@ -1120,7 +1493,18 @@ def looks_like_structured_transcript(text: str) -> bool:
     return number_word_count >= 2
 
 
-def structured_transcript_likely_incomplete(text: str) -> bool:
+def structured_transcript_likely_incomplete(
+    text: str, capture_mode: Optional[str] = None
+) -> bool:
+    if capture_mode == "vehicleRegistration":
+        return len(text) < 4 or not re.search(r"[A-Z]", text)
+    if capture_mode == "phoneNumber":
+        return len(re.sub(r"\D", "", text)) < 8
+    if capture_mode == "customerEmail":
+        return not capture_mode_is_complete(text, capture_mode)
+    if capture_mode == "customerName":
+        return len(text.replace(" ", "")) < 2
+
     lower = text.lower().strip()
     digit_like_count = structured_digit_like_count(lower)
     word_count = transcript_word_count(lower)
@@ -1141,12 +1525,15 @@ def structured_transcript_likely_incomplete(text: str) -> bool:
     return word_count < 4
 
 
-def transcript_looks_complete(text: str) -> bool:
+def transcript_looks_complete(text: str, capture_mode: Optional[str] = None) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
 
-    if looks_like_structured_transcript(stripped):
+    if is_exact_capture_mode(capture_mode):
+        return capture_mode_is_complete(stripped, capture_mode)
+
+    if looks_like_structured_transcript(stripped, capture_mode):
         return False
 
     if transcript_word_count(stripped) < TRANSCRIPT_MIN_FINAL_WORDS:
@@ -1162,7 +1549,19 @@ def clean_transcript_fragment(text: str) -> str:
     return text
 
 
-def join_transcript_fragments(parts: List[str]) -> str:
+def join_transcript_fragments(
+    parts: List[str],
+    capture_mode: Optional[str] = None,
+) -> str:
+    if is_exact_capture_mode(capture_mode):
+        combined = ""
+        for part in parts:
+            fragment = normalize_for_capture_mode(part, capture_mode)
+            if not fragment:
+                continue
+            combined = merge_capture_values(combined, fragment)
+        return combined.strip()
+
     cleaned: List[str] = []
     for index, part in enumerate(parts):
         fragment = clean_transcript_fragment(part)
@@ -1348,6 +1747,9 @@ class VoiceActivityDetector:
             else SPEECH_LIKELIHOOD_THRESHOLD
         )
 
+    def exact_capture_mode_active(self) -> bool:
+        return is_exact_capture_mode(self.session.current_capture_mode())
+
     def score_speech_likelihood(self, samples: np.ndarray) -> float:
         heuristic_score = estimate_speech_likelihood(samples)
         model_score = self.speech_gate.score(samples)
@@ -1437,9 +1839,12 @@ class VoiceActivityDetector:
     ) -> bool:
         if not self.session.is_assistant_interruptible():
             self.barge_candidate_ms = 0
+            required_likelihood = self.required_speech_likelihood(False)
+            if self.exact_capture_mode_active():
+                required_likelihood = max(0.3, required_likelihood - 0.1)
             return (
-                level >= threshold
-                and speech_likelihood >= self.required_speech_likelihood(False)
+                level >= (threshold * 0.85 if self.exact_capture_mode_active() else threshold)
+                and speech_likelihood >= required_likelihood
             )
 
         grace_active = self.session.is_in_assistant_barge_grace()
@@ -1508,6 +1913,14 @@ class VoiceActivityDetector:
         required_speech_likelihood = self.required_speech_likelihood(
             turn.started_during_assistant
         )
+        if self.exact_capture_mode_active() and not turn.started_during_assistant:
+            min_speech = max(80, int(min_speech * 0.5))
+            min_audio_ms = max(90, int(min_audio_ms * 0.5))
+            min_speech_like_ms = max(80, int(min_speech_like_ms * 0.5))
+            required_peak = max(MIN_PEAK_LEVEL * 0.9, required_peak * 0.75)
+            required_speech_likelihood = max(
+                0.28, required_speech_likelihood - 0.12
+            )
         average_speech_likelihood = (
             turn.speech_likelihood_total / turn.speech_likelihood_frames
             if turn.speech_likelihood_frames
@@ -1520,7 +1933,9 @@ class VoiceActivityDetector:
             and turn.speech_like_ms >= min_speech_like_ms
             and turn.max_level >= required_peak
             and turn.max_speech_likelihood >= required_speech_likelihood
-            and average_speech_likelihood >= required_speech_likelihood * 0.78
+            and average_speech_likelihood
+            >= required_speech_likelihood
+            * (0.62 if self.exact_capture_mode_active() else 0.78)
         )
 
         if not accepted:
@@ -1678,6 +2093,7 @@ class VoiceSession:
         self.task_key = DEFAULT_TASK_KEY
         self.policy_focus_slot: Optional[str] = None
         self.policy_action: Optional[str] = None
+        self.policy_capture_mode: Optional[str] = None
 
     async def start_control(self, task_key: str) -> None:
         self.task_key = task_key
@@ -1957,9 +2373,13 @@ class VoiceSession:
                 "type": "gateway.transcript.holding",
                 "timestamp": now_iso(),
                 "payload": {
-                    "text": join_transcript_fragments(self.pending_transcript.parts),
+                    "text": join_transcript_fragments(
+                        self.pending_transcript.parts,
+                        self.pending_transcript.capture_mode,
+                    ),
                     "parts": len(self.pending_transcript.parts),
                     "reason": "user_continued_speaking",
+                    "captureMode": self.pending_transcript.capture_mode,
                 },
             }
         )
@@ -1968,11 +2388,17 @@ class VoiceSession:
         if self.pending_transcript is None or self.pending_transcript_task is not None:
             return
 
-        text = join_transcript_fragments(self.pending_transcript.parts)
+        text = join_transcript_fragments(
+            self.pending_transcript.parts,
+            self.pending_transcript.capture_mode,
+        )
         if not text:
             return
 
-        delay_ms = self.transcript_commit_delay_ms(text)
+        delay_ms = self.transcript_commit_delay_ms(
+            text,
+            self.pending_transcript.capture_mode,
+        )
         self.schedule_pending_transcript_commit(delay_ms)
         await self.send_browser_event(
             {
@@ -1983,6 +2409,7 @@ class VoiceSession:
                     "parts": len(self.pending_transcript.parts),
                     "reason": reason,
                     "delayMs": delay_ms,
+                    "captureMode": self.pending_transcript.capture_mode,
                 },
             }
         )
@@ -2130,6 +2557,7 @@ class VoiceSession:
                 "payload": {"generation": generation, "samples": int(samples.size)},
             }
         )
+        capture_mode = self.current_capture_mode()
         initial_prompt = self.build_stt_initial_prompt()
         hotwords = self.build_stt_hotwords()
         text, latency_ms = await asyncio.to_thread(
@@ -2137,6 +2565,7 @@ class VoiceSession:
             samples,
             initial_prompt,
             hotwords,
+            capture_mode,
         )
         metric.stt_ended_at = time.perf_counter()
         text = text.strip()
@@ -2188,9 +2617,14 @@ class VoiceSession:
         action = str(payload.get("action") or "").strip() or None
         self.policy_focus_slot = slot_key
         self.policy_action = action
+        self.policy_capture_mode = capture_mode_for_policy(slot_key, action)
+
+    def current_capture_mode(self) -> Optional[str]:
+        return self.policy_capture_mode
 
     def build_stt_initial_prompt(self) -> Optional[str]:
         parts: List[str] = []
+        capture_mode = self.current_capture_mode()
         if STT_INITIAL_PROMPT:
             parts.append(STT_INITIAL_PROMPT)
 
@@ -2199,21 +2633,21 @@ class VoiceSession:
                 "Australian vehicle service booking call. Registrations, names, phone numbers, and email addresses may be spoken one character at a time."
             )
 
-        if self.policy_focus_slot == "vehicleRegistration":
+        if capture_mode == "vehicleRegistration":
             parts.append(
-                "The caller may be saying a vehicle registration. Transcribe letters and digits literally, for example 4 Z X 2 B or A B C 1 2 3."
+                "Transcribe exactly. The caller is likely saying a vehicle registration. If they spell letters or digits, preserve each character literally. Do not autocorrect into normal words. Keep repeated letters and digits exactly."
             )
-        elif self.policy_focus_slot == "phoneNumber":
+        elif capture_mode == "phoneNumber":
             parts.append(
-                "The caller may be saying a phone number digit by digit. Keep every spoken digit."
+                "Transcribe exactly. The caller is likely saying a phone number digit by digit. Preserve every digit exactly, including repeated zeros."
             )
-        elif self.policy_focus_slot == "customerEmail":
+        elif capture_mode == "customerEmail":
             parts.append(
-                "The caller may be saying an email address using words like at and dot. Preserve spelling carefully."
+                "Transcribe exactly. The caller is likely spelling an email address. Preserve letters, digits, at, dot, dash, underscore, and plus exactly."
             )
-        elif self.policy_focus_slot == "customerName":
+        elif capture_mode == "customerName":
             parts.append(
-                "The caller may be saying or spelling a person name one letter at a time."
+                "Transcribe exactly. The caller may be spelling a person name one letter at a time. Preserve the letters literally and do not autocorrect into a different word."
             )
 
         prompt = " ".join(part.strip() for part in parts if part and part.strip()).strip()
@@ -2221,6 +2655,7 @@ class VoiceSession:
 
     def build_stt_hotwords(self) -> Optional[str]:
         terms: List[str] = []
+        capture_mode = self.current_capture_mode()
         if STT_HOTWORDS:
             terms.extend([term.strip() for term in STT_HOTWORDS.split(",") if term.strip()])
 
@@ -2236,14 +2671,39 @@ class VoiceSession:
                 ]
             )
 
-        if self.policy_focus_slot == "vehicleRegistration":
-            terms.extend(["vehicle registration", "rego", "plate"])
-        elif self.policy_focus_slot == "phoneNumber":
-            terms.extend(["phone number", "mobile"])
-        elif self.policy_focus_slot == "customerEmail":
-            terms.extend(["email", "gmail", "outlook", "hotmail"])
-        elif self.policy_focus_slot == "customerName":
-            terms.extend(["name"])
+        if capture_mode == "vehicleRegistration":
+            terms.extend(
+                [
+                    "vehicle registration",
+                    "rego",
+                    "plate",
+                    "double",
+                    "triple",
+                    "alpha",
+                    "bravo",
+                    "charlie",
+                    "delta",
+                    "x-ray",
+                    "zed",
+                ]
+            )
+        elif capture_mode == "phoneNumber":
+            terms.extend(["phone number", "mobile", "double", "triple"])
+        elif capture_mode == "customerEmail":
+            terms.extend(
+                [
+                    "email",
+                    "gmail",
+                    "outlook",
+                    "hotmail",
+                    "underscore",
+                    "dash",
+                    "dot",
+                    "at",
+                ]
+            )
+        elif capture_mode == "customerName":
+            terms.extend(["name", "spell", "letters", "alpha", "bravo", "charlie"])
 
         unique_terms = []
         seen = set()
@@ -2264,12 +2724,13 @@ class VoiceSession:
             await self.commit_user_transcript(text, metric)
             return
 
-        text = clean_transcript_fragment(text)
+        capture_mode = self.current_capture_mode()
+        text = normalize_for_capture_mode(text, capture_mode)
         if not text:
             return
 
         now = time.perf_counter()
-        structured = looks_like_structured_transcript(text)
+        structured = looks_like_structured_transcript(text, capture_mode)
 
         if self.pending_transcript is None:
             self.pending_transcript = PendingTranscript(
@@ -2277,23 +2738,35 @@ class VoiceSession:
                 metric=metric,
                 first_part_at=now,
                 structured=structured,
+                capture_mode=capture_mode,
             )
         else:
             pending = self.pending_transcript
             pending.parts.append(text)
             pending.structured = pending.structured or structured
+            pending.capture_mode = pending.capture_mode or capture_mode
             pending.metric.stt_ended_at = metric.stt_ended_at
 
-        combined = join_transcript_fragments(self.pending_transcript.parts)
+        combined = join_transcript_fragments(
+            self.pending_transcript.parts,
+            self.pending_transcript.capture_mode,
+        )
         elapsed_coalesce_ms = int((now - self.pending_transcript.first_part_at) * 1000)
         should_commit_now = (
-            transcript_looks_complete(combined)
+            transcript_looks_complete(combined, self.pending_transcript.capture_mode)
             or (
                 TRANSCRIPT_MAX_COALESCE_MS > 0
                 and elapsed_coalesce_ms >= TRANSCRIPT_MAX_COALESCE_MS
             )
         )
-        delay_ms = 0 if should_commit_now else self.transcript_commit_delay_ms(combined)
+        delay_ms = (
+            0
+            if should_commit_now
+            else self.transcript_commit_delay_ms(
+                combined,
+                self.pending_transcript.capture_mode,
+            )
+        )
         await self.send_browser_event(
             {
                 "type": "gateway.transcript.pending",
@@ -2305,8 +2778,12 @@ class VoiceSession:
                     "delayMs": delay_ms,
                     "incompleteStructured": (
                         self.pending_transcript.structured
-                        and structured_transcript_likely_incomplete(combined)
+                        and structured_transcript_likely_incomplete(
+                            combined,
+                            self.pending_transcript.capture_mode,
+                        )
                     ),
+                    "captureMode": self.pending_transcript.capture_mode,
                 },
             }
         )
@@ -2319,9 +2796,13 @@ class VoiceSession:
             self.commit_pending_transcript_after(delay_ms)
         )
 
-    def transcript_commit_delay_ms(self, text: str) -> int:
-        if looks_like_structured_transcript(text):
-            if structured_transcript_likely_incomplete(text):
+    def transcript_commit_delay_ms(
+        self,
+        text: str,
+        capture_mode: Optional[str] = None,
+    ) -> int:
+        if looks_like_structured_transcript(text, capture_mode):
+            if structured_transcript_likely_incomplete(text, capture_mode):
                 return TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS
             return TRANSCRIPT_STRUCTURED_COMMIT_DELAY_MS
         return TRANSCRIPT_COMMIT_DELAY_MS
@@ -2341,7 +2822,7 @@ class VoiceSession:
 
         self.pending_transcript = None
         self.pending_transcript_task = None
-        text = join_transcript_fragments(pending.parts)
+        text = join_transcript_fragments(pending.parts, pending.capture_mode)
         if not text:
             return
 
@@ -2361,6 +2842,7 @@ class VoiceSession:
                     "parts": len(pending.parts),
                     "structured": pending.structured,
                     "reason": reason,
+                    "captureMode": pending.capture_mode,
                 },
             }
         )

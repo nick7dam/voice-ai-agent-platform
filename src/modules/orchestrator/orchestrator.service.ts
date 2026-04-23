@@ -298,6 +298,18 @@ export class OrchestratorService {
     }
 
     emit({
+      type: 'policy.decision',
+      sessionId,
+      timestamp: nowIso(),
+      payload: {
+        action: result.decision.action,
+        reason: result.decision.reason,
+        slotKey: result.decision.slotKey,
+        shouldReason: result.decision.shouldReason,
+      },
+    });
+
+    emit({
       type: 'reasoning.first_token',
       sessionId,
       timestamp: nowIso(),
