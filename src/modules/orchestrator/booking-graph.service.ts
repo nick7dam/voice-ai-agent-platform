@@ -461,7 +461,27 @@ export class BookingGraphService {
     let debugReason = 'booking_graph_missing_required_slot';
     const endCall = state.userMove === 'end';
 
-    if (state.requestedSlotKey) {
+    if (state.userMove === 'correct' && state.requestedSlotKey) {
+      slots[state.requestedSlotKey] = this.emptySlot();
+      focusSlot = state.requestedSlotKey;
+      confirmationTarget = null;
+
+      const hasReplacementValue = state.extractedUpdates.some(
+        (update) => update.slotKey === state.requestedSlotKey,
+      );
+      if (!hasReplacementValue) {
+        nextAction = 'ask';
+        debugReason = 'slot_correction_requested';
+        return {
+          slots,
+          focusSlot,
+          confirmationTarget,
+          nextAction,
+          debugReason,
+          endCall,
+        };
+      }
+    } else if (state.requestedSlotKey) {
       if (slots[state.requestedSlotKey].value) {
         focusSlot = state.requestedSlotKey;
         confirmationTarget = state.requestedSlotKey;
@@ -863,6 +883,18 @@ export class BookingGraphService {
       /^(no|nope|no that'?s not right|no it'?s not|not correct|not right|incorrect|wrong|that'?s wrong|that is wrong|not entirely)$/i.test(
         normalized,
       ) || negativeCompacts.has(compact);
+    const explicitCorrectionSlot = this.detectExplicitCorrectionSlot(normalized);
+    const isCorrectionIntent =
+      isNegative ||
+      /\b(wrong|incorrect|not correct|not right|mistake)\b/i.test(normalized);
+
+    if (explicitCorrectionSlot && isCorrectionIntent) {
+      return {
+        userMove: 'correct',
+        requestedSlotKey: explicitCorrectionSlot,
+        extractedUpdates: [],
+      };
+    }
 
     if (confirmationTarget && isAffirmative) {
       return {
@@ -909,6 +941,34 @@ export class BookingGraphService {
         requestedSlotKey: null,
         extractedUpdates: [],
       };
+    }
+
+    return null;
+  }
+
+  private detectExplicitCorrectionSlot(text: string): BookingSlotKey | null {
+    if (!/\b(wrong|incorrect|not correct|not right|mistake)\b/i.test(text)) {
+      return null;
+    }
+
+    if (/\b(rego|registration|plate|vehicle registration)\b/i.test(text)) {
+      return 'vehicleRegistration';
+    }
+
+    if (/\b(phone|mobile|number)\b/i.test(text)) {
+      return 'phoneNumber';
+    }
+
+    if (/\b(name)\b/i.test(text)) {
+      return 'customerName';
+    }
+
+    if (/\b(date|day)\b/i.test(text)) {
+      return 'preferredDate';
+    }
+
+    if (/\b(time)\b/i.test(text)) {
+      return 'preferredTime';
     }
 
     return null;

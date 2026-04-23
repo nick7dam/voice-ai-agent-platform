@@ -403,6 +403,45 @@ describe('BookingGraphService', () => {
     expect(third.state.slots.vehicleRegistration.status).toBe('missing');
   });
 
+  it('reopens registration when the caller says it is wrong after the flow moved on', async () => {
+    const { sessions, tasks, reasoning, service } = createService();
+    const session = sessions.create('car_booking_receptionist');
+    const task = tasks.get('car_booking_receptionist');
+
+    reasoning.enqueue(
+      'What is the vehicle registration?',
+      'I have the vehicle registration as 4 Z X 2. Is that right?',
+      'Can I get your name for the booking?',
+    );
+
+    await service.processTurn(session, task, 'turn-1', 'Oil change.');
+    await service.processTurn(session, task, 'turn-2', '4ZX2');
+    const movedOn = await service.processTurn(
+      session,
+      task,
+      'turn-3',
+      "yes, that's correct.",
+    );
+
+    expect(movedOn.decision.action).toBe('ask');
+    expect(movedOn.decision.slotKey).toBe('customerName');
+    expect(movedOn.state.slots.vehicleRegistration.status).toBe('confirmed');
+
+    const correction = await service.processTurn(
+      session,
+      task,
+      'turn-4',
+      'The registration is wrong.',
+    );
+
+    expect(correction.decision.action).toBe('ask');
+    expect(correction.decision.slotKey).toBe('vehicleRegistration');
+    expect(correction.decision.reason).toBe('slot_correction_requested');
+    expect(correction.state.slots.vehicleRegistration.value).toBeNull();
+    expect(correction.state.slots.vehicleRegistration.status).toBe('missing');
+    expect(correction.state.slots.customerName.value).toBeNull();
+  });
+
   it('captures a relative date and spoken time without asking for the date again', async () => {
     const { session, task, reasoning, service } =
       await moveToPreferredDatePrompt();

@@ -178,6 +178,15 @@ TRANSCRIPT_INCOMPLETE_STRUCTURED_COMMIT_DELAY_MS = int(
 )
 TRANSCRIPT_MAX_COALESCE_MS = int(os.getenv("VOICE_TRANSCRIPT_MAX_COALESCE_MS", "12000"))
 TRANSCRIPT_MIN_FINAL_WORDS = int(os.getenv("VOICE_TRANSCRIPT_MIN_FINAL_WORDS", "5"))
+VEHICLE_REGISTRATION_COMPLETE_CHARS = max(
+    4, int(os.getenv("VOICE_VEHICLE_REGISTRATION_COMPLETE_CHARS", "6"))
+)
+VEHICLE_REGISTRATION_MIN_ACCEPT_CHARS = max(
+    3, int(os.getenv("VOICE_VEHICLE_REGISTRATION_MIN_ACCEPT_CHARS", "4"))
+)
+VEHICLE_REGISTRATION_AMBIGUOUS_COMMIT_MS = max(
+    500, int(os.getenv("VOICE_VEHICLE_REGISTRATION_AMBIGUOUS_COMMIT_MS", "1800"))
+)
 STT_QUEUE_MAX_SIZE = max(1, int(os.getenv("VOICE_STT_QUEUE_MAX_SIZE", "6")))
 GATEWAY_BLOCKING_PRELOAD = env_bool("VOICE_GATEWAY_BLOCKING_PRELOAD", True)
 
@@ -1538,7 +1547,9 @@ def normalize_for_capture_mode(text: str, capture_mode: Optional[str]) -> str:
 def capture_mode_is_complete(text: str, capture_mode: Optional[str]) -> bool:
     if capture_mode == "vehicleRegistration":
         return bool(
-            len(text) >= 4 and re.search(r"[A-Z]", text) and re.search(r"\d", text)
+            len(text) >= VEHICLE_REGISTRATION_COMPLETE_CHARS
+            and re.search(r"[A-Z]", text)
+            and re.search(r"\d", text)
         )
     if capture_mode == "phoneNumber":
         digits = re.sub(r"\D", "", text)
@@ -1548,6 +1559,51 @@ def capture_mode_is_complete(text: str, capture_mode: Optional[str]) -> bool:
     if capture_mode == "customerName":
         return len(text.replace(" ", "")) >= 2
     return False
+
+
+def vehicle_registration_is_ambiguous_but_acceptable(text: str) -> bool:
+    return bool(
+        len(text) >= VEHICLE_REGISTRATION_MIN_ACCEPT_CHARS
+        and re.search(r"[A-Z]", text)
+        and re.search(r"\d", text)
+    )
+
+
+def should_hold_incomplete_exact_capture(
+    text: str,
+    capture_mode: Optional[str],
+    elapsed_ms: int,
+) -> bool:
+    if (
+        capture_mode == "vehicleRegistration"
+        and vehicle_registration_is_ambiguous_but_acceptable(text)
+    ):
+        return elapsed_ms < VEHICLE_REGISTRATION_AMBIGUOUS_COMMIT_MS
+
+    return True
+
+
+def should_passthrough_capture_fallback(
+    text: str,
+    capture_mode: Optional[str],
+) -> bool:
+    if not is_exact_capture_mode(capture_mode):
+        return False
+
+    lower = text.lower().strip()
+    if not lower:
+        return False
+
+    if normalize_control_phrase(lower):
+        return True
+
+    if re.search(
+        r"\b(rego|registration|plate|vehicle|wrong|incorrect|correct|name|phone|mobile|number|date|day|time|service|booking|help|operator|cancel|stop|repeat|read back|readback)\b",
+        lower,
+    ):
+        return True
+
+    return transcript_word_count(lower) >= 2
 
 
 def structured_digit_like_count(text: str) -> int:
@@ -1599,7 +1655,7 @@ def structured_transcript_likely_incomplete(
         return False
 
     if capture_mode == "vehicleRegistration":
-        return len(text) < 4 or not re.search(r"[A-Z]", text)
+        return not capture_mode_is_complete(text, capture_mode)
     if capture_mode == "phoneNumber":
         return len(re.sub(r"\D", "", text)) < 8
     if capture_mode == "customerEmail":
@@ -1670,7 +1726,7 @@ def join_transcript_fragments(
                 latest_control_phrase = control_phrase
                 continue
             combined = merge_capture_values(combined, fragment)
-        if latest_control_phrase:
+        if latest_control_phrase and not combined:
             return latest_control_phrase
         return combined.strip()
 
@@ -1684,6 +1740,21 @@ def join_transcript_fragments(
         cleaned.append(fragment)
 
     return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
+def exact_capture_parts_contain_control_phrase(
+    parts: List[str],
+    capture_mode: Optional[str],
+) -> bool:
+    if not is_exact_capture_mode(capture_mode):
+        return False
+
+    for part in parts:
+        fragment = normalize_for_capture_mode(part, capture_mode)
+        if fragment and normalize_control_phrase(fragment):
+            return True
+
+    return False
 
 
 def turn_sequence_number(turn_id: str) -> int:
@@ -2888,8 +2959,45 @@ class VoiceSession:
             return
 
         capture_mode = self.current_capture_mode()
-        text = normalize_for_capture_mode(text, capture_mode)
+        raw_text = text
+        text = normalize_for_capture_mode(raw_text, capture_mode)
+        if not text and is_exact_capture_mode(capture_mode):
+            fallback_text = clean_transcript_fragment(raw_text)
+            if should_passthrough_capture_fallback(fallback_text, capture_mode):
+                if (
+                    self.pending_transcript is not None
+                    and is_exact_capture_mode(self.pending_transcript.capture_mode)
+                ):
+                    self.pending_transcript = None
+                    if self.pending_transcript_task:
+                        self.pending_transcript_task.cancel()
+                        self.pending_transcript_task = None
+                    await self.send_browser_event(
+                        {
+                            "type": "gateway.transcript.dropped",
+                            "timestamp": now_iso(),
+                            "payload": {
+                                "reason": "capture_mode_interrupted",
+                                "captureMode": capture_mode,
+                            },
+                        }
+                    )
+                text = fallback_text
+                capture_mode = None
         if not text:
+            await self.send_browser_event(
+                {
+                    "type": "gateway.transcription.ignored",
+                    "timestamp": now_iso(),
+                    "payload": {
+                        "reason": "empty_after_capture_normalization",
+                        "captureMode": capture_mode,
+                    },
+                }
+            )
+            await self.resume_pending_transcript_commit(
+                "empty_capture_normalization"
+            )
             return
 
         now = time.perf_counter()
@@ -2915,7 +3023,17 @@ class VoiceSession:
             self.pending_transcript.capture_mode,
         )
         elapsed_coalesce_ms = int((now - self.pending_transcript.first_part_at) * 1000)
+        control_closed_exact_capture = (
+            bool(combined)
+            and is_exact_capture_mode(self.pending_transcript.capture_mode)
+            and exact_capture_parts_contain_control_phrase(
+                self.pending_transcript.parts,
+                self.pending_transcript.capture_mode,
+            )
+        )
         should_commit_now = (
+            control_closed_exact_capture
+            or
             transcript_looks_complete(combined, self.pending_transcript.capture_mode)
             or (
                 TRANSCRIPT_MAX_COALESCE_MS > 0
@@ -2994,11 +3112,20 @@ class VoiceSession:
             reason == "timer"
             and is_exact_capture_mode(pending.capture_mode)
             and structured_transcript_likely_incomplete(text, pending.capture_mode)
+            and not exact_capture_parts_contain_control_phrase(
+                pending.parts,
+                pending.capture_mode,
+            )
         )
         if incomplete_exact_capture and TRANSCRIPT_MAX_COALESCE_MS > 0:
             elapsed_coalesce_ms = int((now - pending.first_part_at) * 1000)
             remaining_ms = TRANSCRIPT_MAX_COALESCE_MS - elapsed_coalesce_ms
-            if remaining_ms > 0:
+            should_hold = should_hold_incomplete_exact_capture(
+                text,
+                pending.capture_mode,
+                elapsed_coalesce_ms,
+            )
+            if should_hold and remaining_ms > 0:
                 self.pending_transcript = pending
                 delay_ms = max(
                     100,
